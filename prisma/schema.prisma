@@ -1,43 +1,71 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// prisma/schema.prisma
 
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+// ==================== Datasource ====================
+datasource db {
+  provider = "sqlite"
+  // Prisma 7 では接続URLはここには書かず、
+  // prisma.config.ts 側の datasource.url で指定します
+}
 
+// ==================== Generator ====================
 generator client {
-  provider = "prisma-client"
+ provider = "prisma-client-js"
+  // Prisma Client を出力するパス
+  // （prisma ディレクトリからの相対パス）
   output   = "../src/generated/prisma"
 }
 
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+// ==================== Models ====================
+
+// アプリ内ユーザー
+// フェーズ1ではオーナー1人のみだが、将来のSaaS化を見据えて定義
+model User {
+  id        String        @id @default(cuid())
+  name      String
+  createdAt DateTime      @default(now())
+
+  events    GithubEvent[]
 }
 
-generator client {
-  provider = "prisma-client-js"
-}
-
+// GitHub から受け取った PR マージイベント
 model GithubEvent {
-  id        String    @id @default(cuid())
-  repoName  String
-  prNumber  Int
-  prTitle   String
-  prUrl     String
-  mergedBy  String?
+  id         String       @id @default(cuid())
+
+  // マルチテナント対応用（フェーズ1では OWNER_USER_ID を入れる）
+  userId     String
+  user       User         @relation(fields: [userId], references: [id])
+
+  // GitHub PR 情報
+  repoName   String       // 例: "kz2021019/docsnap"
+  prNumber   Int          // PR 番号 (#12 など)
+  prTitle    String
+  prUrl      String       // GitHub 上の PR URL
+  mergedBy   String?      // マージしたユーザー名 (login)。不明なら null
+
+  // Webhook の payload 丸ごと
   rawPayload Json
-  createdAt DateTime  @default(now())
-  posts     SnsPost[]
+
+  createdAt  DateTime     @default(now())
+
+  posts      SnsPost[]
+
+  @@index([userId, createdAt])
 }
 
+// GitHub イベントをもとに行った SNS / Webhook 投稿ログ
 model SnsPost {
-  id           String      @id @default(cuid())
+  id           String       @id @default(cuid())
+
   eventId      String
-  event        GithubEvent @relation(fields: [eventId], references: [id])
-  platform     String      // "x", "bluesky", "webhook" など
-  content      String
-  status       String      // "SUCCESS" | "FAILED"
-  externalId   String?
-  errorMessage String?
-  createdAt    DateTime    @default(now())
+  event        GithubEvent  @relation(fields: [eventId], references: [id])
+
+  platform     String       // "webhook" | "x" | "bluesky" など
+  content      String       // 実際に投稿した（しようとした）本文
+  status       String       // "SUCCESS" | "FAILED" | "SKIPPED"
+  externalId   String?      // SNS 側の投稿ID等（なければ null）
+  errorMessage String?      // エラー時のメッセージ（正常時は null）
+
+  createdAt    DateTime     @default(now())
+
+  @@index([eventId, createdAt])
 }

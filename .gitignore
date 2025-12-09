@@ -41,3 +41,12 @@ yarn-error.log*
 next-env.d.ts
 
 /src/generated/prisma
+
+
+# SQLite local DB
+dev.db
+*.db
+
+# local test payload
+test-payload.json
+
