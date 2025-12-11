@@ -1,0 +1,29 @@
+{
+  // 保存時に自動フォーマット
+  "editor.formatOnSave": true,
+
+  // Prettier をデフォルトフォーマッタに
+  "[javascript]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[javascriptreact]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[typescript]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[typescriptreact]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+
+  // 保存時に ESLint の自動修正も実行（未使用import削除など）
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": "explicit"
+  },
+
+  // Tailwind クラス名の補完などを使う場合（拡張機能に合わせて）
+  "tailwindCSS.experimental.classRegex": [
+    "clsx\\(([^)]*)\\)",
+    "cn\\(([^)]*)\\)"
+  ]
+}
