@@ -10,8 +10,14 @@
 !.yarn/releases
 !.yarn/versions
 
+# npm cache
+.npm/
+
 # testing
 /coverage
+/.nyc_output
+/playwright-report
+/test-results
 
 # next.js
 /.next/
@@ -22,7 +28,11 @@
 
 # misc
 .DS_Store
+Thumbs.db
 *.pem
+*.swp
+*.swo
+*.tmp
 
 # debug
 npm-debug.log*
@@ -40,8 +50,8 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# Prisma generated client (build 時に自動生成する前提)
 /src/generated/prisma
-
 
 # SQLite local DB
 dev.db
@@ -50,3 +60,6 @@ dev.db
 # local test payload
 test-payload.json
 
+# Turbopack / SWC cache (Next.js)
+.turbo
+.swc
