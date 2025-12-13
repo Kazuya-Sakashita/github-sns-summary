@@ -22,10 +22,7 @@ export default async function DashboardPage() {
   const now = new Date()
   const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
 
-  // 直近7日間に作られたイベント
   const recentEvents = events.filter((e) => e.createdAt >= sevenDaysAgo && e.createdAt <= now)
-
-  // SnsPost 全体
   const allPosts = events.flatMap((e) => e.posts)
 
   const totalMergedLast7Days = recentEvents.length
@@ -37,7 +34,6 @@ export default async function DashboardPage() {
   return (
     <AppLayout>
       <div className="space-y-8">
-        {/* Header */}
         <div className="space-y-3">
           <h1 className="text-gradient text-3xl font-bold tracking-tight sm:text-4xl">
             ダッシュボード
@@ -47,14 +43,12 @@ export default async function DashboardPage() {
           </p>
         </div>
 
-        {/* Stats */}
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-6 lg:grid-cols-3">
           <StatsCard title="直近7日間のマージ数" value={totalMergedLast7Days} icon={GitMerge} />
           <StatsCard title="生成されたSNSドラフト数" value={totalSnsDrafts} icon={FileText} />
           <StatsCard title="失敗した生成数" value={totalFailed} icon={AlertCircle} />
         </div>
 
-        {/* Events */}
         <div className="space-y-5">
           <h2 className="text-foreground text-xl font-semibold tracking-tight sm:text-2xl">
             最近のイベント
@@ -70,9 +64,9 @@ export default async function DashboardPage() {
           ) : (
             <div className="space-y-4">
               {events.map((event) => {
+                // getDashboardEvents 側で posts は「最新1件のみ」にしている想定
                 const latestPost = event.posts[0] ?? null
 
-                // GithubEventCard が期待している形にマッピング
                 return (
                   <GithubEventCard
                     key={event.id}
@@ -84,9 +78,18 @@ export default async function DashboardPage() {
                       githubUrl: event.prUrl,
                       mergedBy: event.mergedBy ?? "unknown",
                       mergedAt: formatJpDate(event.createdAt),
+
+                      // status-badge 用（SnsPost が無ければ NONE）
                       status: (latestPost?.status as "SUCCESS" | "FAILED" | "NONE") ?? "NONE",
-                      aiSummary: latestPost?.content ?? "",
-                      snsDraft: latestPost?.content ?? "",
+
+                      // 表示用（空文字じゃなく undefined 推奨）
+                      aiSummary: latestPost?.content ?? undefined,
+                      snsDraft: latestPost?.content ?? undefined,
+
+                      // ★Webhook送信ボタン表示に必要
+                      snsPostId: latestPost?.id ?? undefined,
+                      snsStatus:
+                        (latestPost?.status as "SUCCESS" | "FAILED" | "PENDING") ?? undefined,
                     }}
                   />
                 )
