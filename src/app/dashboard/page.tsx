@@ -5,6 +5,11 @@ import { GithubEventCard } from "@/app/components/github-event-card"
 import { EmptyState } from "@/app/components/empty-state"
 import { GitMerge, FileText, AlertCircle } from "lucide-react"
 import { getDashboardEvents } from "@/server/dashboard/getDashboardEvents"
+import { unstable_noStore as noStore } from "next/cache"
+import { RefreshButton } from "./_components/refresh-button"
+
+export const dynamic = "force-dynamic"
+export const revalidate = 0
 
 function formatJpDate(date: Date) {
   return date.toLocaleString("ja-JP", {
@@ -16,7 +21,13 @@ function formatJpDate(date: Date) {
   })
 }
 
+type UiStatus = "SUCCESS" | "FAILED" | "NONE"
+
+// ✅ GithubEventCard.tsx 側の snsStatus と合わせる（PENDINGは今回は扱わない）
+type WebhookStatusUi = "SUCCESS" | "FAILED" | "UNSENT" | undefined
+
 export default async function DashboardPage() {
+  noStore()
   const events = await getDashboardEvents()
 
   const now = new Date()
@@ -34,21 +45,27 @@ export default async function DashboardPage() {
   return (
     <AppLayout>
       <div className="space-y-8">
-        <div className="space-y-3">
-          <h1 className="text-gradient text-3xl font-bold tracking-tight sm:text-4xl">
-            ダッシュボード
-          </h1>
-          <p className="text-muted-foreground max-w-2xl text-sm leading-relaxed sm:text-base">
-            GitHub のマージ済み PR と AI の要約・SNSドラフトを一覧で確認できます
-          </p>
+        {/* Header */}
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-3">
+            <h1 className="text-gradient text-3xl font-bold tracking-tight sm:text-4xl">
+              ダッシュボード
+            </h1>
+            <p className="text-muted-foreground max-w-2xl text-sm leading-relaxed sm:text-base">
+              GitHub のマージ済み PR と AI の要約・SNSドラフトを一覧で確認できます
+            </p>
+          </div>
+          <RefreshButton />
         </div>
 
+        {/* Stats */}
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-6 lg:grid-cols-3">
           <StatsCard title="直近7日間のマージ数" value={totalMergedLast7Days} icon={GitMerge} />
           <StatsCard title="生成されたSNSドラフト数" value={totalSnsDrafts} icon={FileText} />
           <StatsCard title="失敗した生成数" value={totalFailed} icon={AlertCircle} />
         </div>
 
+        {/* Events */}
         <div className="space-y-5">
           <h2 className="text-foreground text-xl font-semibold tracking-tight sm:text-2xl">
             最近のイベント
@@ -64,8 +81,23 @@ export default async function DashboardPage() {
           ) : (
             <div className="space-y-4">
               {events.map((event) => {
-                // getDashboardEvents 側で posts は「最新1件のみ」にしている想定
                 const latestPost = event.posts[0] ?? null
+
+                const uiStatus: UiStatus =
+                  latestPost?.status === "SUCCESS"
+                    ? "SUCCESS"
+                    : latestPost?.status === "FAILED"
+                      ? "FAILED"
+                      : "NONE"
+
+                // ✅ Webhook表示は #14 スコープ通り（未送信/成功/失敗）
+                // PENDING が来ても未送信扱いに寄せる
+                const webhookStatus: WebhookStatusUi =
+                  latestPost?.status === "SUCCESS"
+                    ? "SUCCESS"
+                    : latestPost?.status === "FAILED"
+                      ? "FAILED"
+                      : undefined // ← UNSENT扱い（GithubEventCard側でUNSENT表示）
 
                 return (
                   <GithubEventCard
@@ -79,17 +111,13 @@ export default async function DashboardPage() {
                       mergedBy: event.mergedBy ?? "unknown",
                       mergedAt: formatJpDate(event.createdAt),
 
-                      // status-badge 用（SnsPost が無ければ NONE）
-                      status: (latestPost?.status as "SUCCESS" | "FAILED" | "NONE") ?? "NONE",
+                      status: uiStatus,
 
-                      // 表示用（空文字じゃなく undefined 推奨）
                       aiSummary: latestPost?.content ?? undefined,
                       snsDraft: latestPost?.content ?? undefined,
 
-                      // ★Webhook送信ボタン表示に必要
                       snsPostId: latestPost?.id ?? undefined,
-                      snsStatus:
-                        (latestPost?.status as "SUCCESS" | "FAILED" | "PENDING") ?? undefined,
+                      snsStatus: webhookStatus,
                     }}
                   />
                 )

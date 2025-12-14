@@ -10,6 +10,10 @@ import { StatusBadge } from "@/app/components/status-badge"
 import { useToast } from "@/app/hooks/use-toast"
 import { useSummarize } from "@/app/hooks/use-summarize"
 import { useSendWebhook } from "@/app/hooks/use-send-webhook"
+import { cn } from "@/lib/utils"
+
+type AiStatus = "SUCCESS" | "FAILED" | "NONE"
+type WebhookStatus = "SUCCESS" | "FAILED" | "UNSENT"
 
 interface GithubEvent {
   id: string
@@ -20,14 +24,47 @@ interface GithubEvent {
   mergedBy: string
   mergedAt: string
 
-  status: "SUCCESS" | "FAILED" | "NONE"
+  // AI要約の状態（既存）
+  status: AiStatus
 
   aiSummary?: string
   snsDraft?: string
 
-  // Webhook 送信用（※ここが入ってないと送信できない）
+  // Webhook送信用
   snsPostId?: string
-  snsStatus?: "SUCCESS" | "FAILED" | "PENDING"
+  snsStatus?: WebhookStatus
+}
+
+function WebhookStatusBadge({ status }: { status: WebhookStatus }) {
+  const config: Record<WebhookStatus, { label: string; className: string }> = {
+    UNSENT: {
+      label: "未送信",
+      className: "bg-muted text-muted-foreground border-border",
+    },
+    SUCCESS: {
+      label: "送信済み",
+      className: "bg-emerald-500/10 text-emerald-700 border-emerald-500/30",
+    },
+    FAILED: {
+      label: "送信失敗",
+      className: "bg-destructive/10 text-destructive border-destructive/30",
+    },
+  }
+
+  const c = config[status]
+
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold",
+        c.className,
+      )}
+      aria-label={`Webhook送信状態: ${c.label}`}
+      title={`Webhook送信状態: ${c.label}`}
+    >
+      {c.label}
+    </span>
+  )
 }
 
 export function GithubEventCard({ event }: { event: GithubEvent }) {
@@ -40,7 +77,7 @@ export function GithubEventCard({ event }: { event: GithubEvent }) {
     githubEventId: event.id,
   })
 
-  // Webhook 送信（snsPostId を送る想定）
+  // Webhook 送信（snsPostId を送る）
   const { send, isSending } = useSendWebhook({
     onSuccess: () => {
       toast({ description: "Webhook に送信しました" })
@@ -75,10 +112,13 @@ export function GithubEventCard({ event }: { event: GithubEvent }) {
       })
       return
     }
-
-    // ✅ ここがポイント：string を渡す
     await send(event.snsPostId)
   }
+
+  // Webhook状態の表示は「snsPostId があるか」で決めるのが安全
+  // - snsPostId が無い = そもそも送る対象がないので未送信扱い
+  // - snsPostId がある = snsStatus が入る想定。無ければ未送信扱いに寄せる
+  const webhookStatus: WebhookStatus = event.snsPostId ? (event.snsStatus ?? "UNSENT") : "UNSENT"
 
   return (
     <Card className="group border-border/50 overflow-hidden transition-all duration-300 hover:-translate-y-1 hover:shadow-lg">
@@ -102,7 +142,11 @@ export function GithubEventCard({ event }: { event: GithubEvent }) {
           </div>
 
           <div className="flex shrink-0 flex-col items-end gap-2.5">
+            {/* AI要約の状態 */}
             <StatusBadge status={event.status} />
+
+            {/* ✅ Webhook送信状態（#14 の要件） */}
+            <WebhookStatusBadge status={webhookStatus} />
 
             <Button
               variant="outline"
@@ -150,8 +194,11 @@ export function GithubEventCard({ event }: { event: GithubEvent }) {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => handleCopy(event.snsDraft!)}
-                disabled={isCopying}
+                onClick={() => {
+                  if (!event.snsDraft) return
+                  void handleCopy(event.snsDraft)
+                }}
+                disabled={isCopying || !event.snsDraft}
                 className="hover:bg-foreground hover:text-background h-9 text-xs transition-all"
               >
                 <Copy className="mr-1.5 h-3.5 w-3.5" />
@@ -171,7 +218,7 @@ export function GithubEventCard({ event }: { event: GithubEvent }) {
                 {isRegenerating ? "再生成中..." : "AI 要約を再生成"}
               </Button>
 
-              {/* ✅ snsPostId があるときだけ表示 */}
+              {/* snsPostId があるときだけ送信可能 */}
               {event.snsPostId && (
                 <Button
                   variant="outline"
