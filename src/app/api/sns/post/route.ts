@@ -1,5 +1,6 @@
 // src/app/api/sns/post/route.ts
 import { NextRequest, NextResponse } from "next/server"
+import { revalidatePath } from "next/cache"
 import { prisma } from "@/server/db/client"
 
 export async function POST(req: NextRequest) {
@@ -8,13 +9,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "SNS_WEBHOOK_URL is not configured" }, { status: 500 })
   }
 
-  // body parse
-  const { snsPostId } = await req.json().catch(() => ({}))
+  console.log("[sns/post] SNS_WEBHOOK_URL =", webhookUrl)
+
+  const { snsPostId } = await req.json().catch(() => ({}) as { snsPostId?: string })
   if (!snsPostId) {
     return NextResponse.json({ error: "snsPostId is required" }, { status: 400 })
   }
 
-  // fetch post
   const snsPost = await prisma.snsPost.findUnique({
     where: { id: snsPostId },
     include: { event: true },
@@ -45,7 +46,7 @@ export async function POST(req: NextRequest) {
       body: JSON.stringify(payload),
     })
 
-    const text = await res.text()
+    const text = await res.text().catch(() => "")
 
     const updated = await prisma.snsPost.update({
       where: { id: snsPost.id },
@@ -55,7 +56,10 @@ export async function POST(req: NextRequest) {
       },
     })
 
-    return NextResponse.json({ ok: res.ok, snsPost: updated })
+    // ✅ /dashboard の表示キャッシュを破棄
+    revalidatePath("/dashboard")
+
+    return NextResponse.json({ ok: res.ok, snsPost: updated }, { status: res.ok ? 200 : 500 })
   } catch (e) {
     const message = e instanceof Error ? e.message : "unknown error"
 
@@ -67,6 +71,9 @@ export async function POST(req: NextRequest) {
       },
     })
 
-    return NextResponse.json({ error: message, snsPost: updated }, { status: 500 })
+    // ✅ 失敗時も /dashboard の表示キャッシュを破棄
+    revalidatePath("/dashboard")
+
+    return NextResponse.json({ ok: false, error: message, snsPost: updated }, { status: 500 })
   }
 }
