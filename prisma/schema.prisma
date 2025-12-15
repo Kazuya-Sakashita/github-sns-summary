@@ -9,16 +9,12 @@ datasource db {
 
 // ==================== Generator ====================
 generator client {
- provider = "prisma-client-js"
-  // Prisma Client を出力するパス
-  // （prisma ディレクトリからの相対パス）
-  output   = "../src/generated/prisma"
+  provider = "prisma-client-js"
 }
 
 // ==================== Models ====================
 
 // アプリ内ユーザー
-// フェーズ1ではオーナー1人のみだが、将来のSaaS化を見据えて定義
 model User {
   id        String        @id @default(cuid())
   name      String
@@ -29,27 +25,34 @@ model User {
 
 // GitHub から受け取った PR マージイベント
 model GithubEvent {
-  id         String       @id @default(cuid())
+  id              String       @id @default(cuid())
+
+  // ✅ GitHub Webhook の delivery ID（x-github-delivery）
+  // 同じ Webhook が再送されても同一IDになるため、これで二重保存を防止できる
+  githubDeliveryId String      @unique
 
   // マルチテナント対応用（フェーズ1では OWNER_USER_ID を入れる）
-  userId     String
-  user       User         @relation(fields: [userId], references: [id])
+  userId           String
+  user             User        @relation(fields: [userId], references: [id])
 
   // GitHub PR 情報
-  repoName   String       // 例: "kz2021019/docsnap"
-  prNumber   Int          // PR 番号 (#12 など)
-  prTitle    String
-  prUrl      String       // GitHub 上の PR URL
-  mergedBy   String?      // マージしたユーザー名 (login)。不明なら null
+  repoName         String       // 例: "kz2021019/docsnap"
+  prNumber         Int          // PR 番号 (#12 など)
+  prTitle          String
+  prUrl            String       // GitHub 上の PR URL
+  mergedBy         String?      // マージしたユーザー名 (login)。不明なら null
 
   // Webhook の payload 丸ごと
-  rawPayload Json
+  rawPayload       Json
 
-  createdAt  DateTime     @default(now())
+  createdAt        DateTime     @default(now())
 
-  posts      SnsPost[]
+  posts            SnsPost[]
+
+  @@unique([userId, repoName, prNumber])
 
   @@index([userId, createdAt])
+  @@index([repoName, prNumber])
 }
 
 // GitHub イベントをもとに行った SNS / Webhook 投稿ログ
@@ -62,8 +65,8 @@ model SnsPost {
   platform     String       // "webhook" | "x" | "bluesky" など
   content      String       // 実際に投稿した（しようとした）本文
   status       String       // "SUCCESS" | "FAILED" | "SKIPPED"
-  externalId   String?      // SNS 側の投稿ID等（なければ null）
-  errorMessage String?      // エラー時のメッセージ（正常時は null）
+  externalId   String?
+  errorMessage String?
 
   createdAt    DateTime     @default(now())
 
