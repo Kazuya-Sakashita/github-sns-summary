@@ -8,6 +8,7 @@ CREATE TABLE "User" (
 -- CreateTable
 CREATE TABLE "GithubEvent" (
     "id" TEXT NOT NULL PRIMARY KEY,
+    "githubDeliveryId" TEXT NOT NULL,
     "userId" TEXT NOT NULL,
     "repoName" TEXT NOT NULL,
     "prNumber" INTEGER NOT NULL,
@@ -33,7 +34,16 @@ CREATE TABLE "SnsPost" (
 );
 
 -- CreateIndex
+CREATE UNIQUE INDEX "GithubEvent_githubDeliveryId_key" ON "GithubEvent"("githubDeliveryId");
+
+-- CreateIndex
 CREATE INDEX "GithubEvent_userId_createdAt_idx" ON "GithubEvent"("userId", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "GithubEvent_repoName_prNumber_idx" ON "GithubEvent"("repoName", "prNumber");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "GithubEvent_userId_repoName_prNumber_key" ON "GithubEvent"("userId", "repoName", "prNumber");
 
 -- CreateIndex
 CREATE INDEX "SnsPost_eventId_createdAt_idx" ON "SnsPost"("eventId", "createdAt");
