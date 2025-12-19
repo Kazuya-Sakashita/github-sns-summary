@@ -8,7 +8,7 @@ CREATE TABLE "User" (
 -- CreateTable
 CREATE TABLE "GithubEvent" (
     "id" TEXT NOT NULL PRIMARY KEY,
-    "githubDeliveryId" TEXT NOT NULL,
+    "githubDeliveryId" TEXT,
     "userId" TEXT NOT NULL,
     "repoName" TEXT NOT NULL,
     "prNumber" INTEGER NOT NULL,
@@ -32,9 +32,6 @@ CREATE TABLE "SnsPost" (
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "SnsPost_eventId_fkey" FOREIGN KEY ("eventId") REFERENCES "GithubEvent" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
 );
-
--- CreateIndex
-CREATE UNIQUE INDEX "GithubEvent_githubDeliveryId_key" ON "GithubEvent"("githubDeliveryId");
 
 -- CreateIndex
 CREATE INDEX "GithubEvent_userId_createdAt_idx" ON "GithubEvent"("userId", "createdAt");
