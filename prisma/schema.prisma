@@ -29,8 +29,7 @@ model GithubEvent {
 
   // ✅ GitHub Webhook の delivery ID（x-github-delivery）
   // 同じ Webhook が再送されても同一IDになるため、これで二重保存を防止できる
-  githubDeliveryId String      @unique
-
+  githubDeliveryId String @unique
   // マルチテナント対応用（フェーズ1では OWNER_USER_ID を入れる）
   userId           String
   user             User        @relation(fields: [userId], references: [id])
