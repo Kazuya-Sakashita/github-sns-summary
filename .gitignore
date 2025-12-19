@@ -63,3 +63,6 @@ test-payload.json
 # Turbopack / SWC cache (Next.js)
 .turbo
 .swc
+
+
+prisma/migrations__bak_issue20/
