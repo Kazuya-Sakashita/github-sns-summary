@@ -10,7 +10,6 @@ const adapter = new PrismaBetterSqlite3({
 
 const prisma = new PrismaClient({ adapter })
 
-// ---- 設定（必要なら env で切替）----
 const DRY_RUN = process.env.DRY_RUN === "1"
 const BATCH_SIZE = Number(process.env.BATCH_SIZE ?? "200")
 
@@ -18,36 +17,41 @@ function makeLegacyDeliveryId(eventId: string) {
   return `legacy-${eventId}-${randomUUID()}`
 }
 
-type EventRow = {
-  id: string
-  githubDeliveryId: string | null
+type CountRow = { c: number }
+type IdRow = { id: string }
+
+// NOTE:
+// Prisma schema が required でも、DB には移行途中で NULL が残り得るため
+// 「NULL判定」は Prisma の where ではなく raw SQL で吸収する
+async function countMissingBySql() {
+  const rows = await prisma.$queryRaw<CountRow[]>`
+    SELECT COUNT(*) AS c
+    FROM GithubEvent
+    WHERE githubDeliveryId IS NULL OR githubDeliveryId = ''
+  `
+  return rows[0]?.c ?? 0
 }
 
-function isMissingDeliveryId(v: string | null) {
-  // required でも過去データで "" が入ってる可能性を拾う
-  return v == null || v.trim() === ""
+async function getMissingIdsBySql() {
+  return prisma.$queryRaw<IdRow[]>`
+    SELECT id
+    FROM GithubEvent
+    WHERE githubDeliveryId IS NULL OR githubDeliveryId = ''
+  `
 }
 
-async function loadEvents(): Promise<EventRow[]> {
-  // where で null を使えないので、必要な列だけ取ってJSで判定する
-  return prisma.githubEvent.findMany({
-    select: { id: true, githubDeliveryId: true },
-  })
-}
-
-async function printCheck(events?: EventRow[]) {
-  const rows = events ?? (await loadEvents())
-  const total = rows.length
-  const missing = rows.filter((e) => isMissingDeliveryId(e.githubDeliveryId)).length
+async function printCheck() {
+  const total = await prisma.githubEvent.count()
+  const missing = await countMissingBySql()
   const filled = total - missing
   console.warn("[check]", { total, filled, missing })
-  return { total, filled, missing, rows }
+  return { total, filled, missing }
 }
 
 async function main() {
-  const { rows } = await printCheck()
+  await printCheck()
 
-  const targets = rows.filter((e) => isMissingDeliveryId(e.githubDeliveryId))
+  const targets = await getMissingIdsBySql()
 
   if (targets.length === 0) {
     console.warn("[backfill] backfilled: 0 (no missing records)")
