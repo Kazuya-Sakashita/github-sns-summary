@@ -16,60 +16,90 @@ generator client {
 
 // アプリ内ユーザー
 model User {
-  id        String        @id @default(cuid())
+  id        String   @id @default(cuid())
   name      String
-  createdAt DateTime      @default(now())
+  createdAt DateTime @default(now())
 
-  events    GithubEvent[]
+  events GithubEvent[]
 }
 
 // GitHub から受け取った PR マージイベント
 model GithubEvent {
-  id              String       @id @default(cuid())
+  id String @id @default(cuid())
 
   // ✅ GitHub Webhook の delivery ID（x-github-delivery）
   // 同じ Webhook が再送されても同一IDになるため、これで二重保存を防止できる
   githubDeliveryId String @unique
+
   // マルチテナント対応用（フェーズ1では OWNER_USER_ID を入れる）
-  userId           String
-  user             User        @relation(fields: [userId], references: [id])
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
 
   // GitHub PR 情報
-  repoName         String       // 例: "kz2021019/docsnap"
-  prNumber         Int          // PR 番号 (#12 など)
-  prTitle          String
-  prUrl            String       // GitHub 上の PR URL
-  mergedBy         String?      // マージしたユーザー名 (login)。不明なら null
-  mergedAt         DateTime?
-  mergeCommitSha   String?
+  repoName       String // 例: "kz2021019/docsnap"
+  prNumber       Int // PR 番号 (#12 など)
+  prTitle        String
+  prUrl          String // GitHub 上の PR URL
+  mergedBy       String? // マージしたユーザー名 (login)。不明なら null
+  mergedAt       DateTime?
+  mergeCommitSha String?
 
   // Webhook の payload 丸ごと
-  rawPayload       Json
+  rawPayload Json
 
-  createdAt        DateTime     @default(now())
+  createdAt DateTime @default(now())
 
-  posts            SnsPost[]
+  posts SnsPost[]
 
+  // ✅ 逆側（GithubWebhookDelivery とのリレーション）
+  webhookDeliveries GithubWebhookDelivery[]
+
+  // 同一PRの収束用（owner + repo + prNumber）
   @@unique([userId, repoName, prNumber])
-
   @@index([userId, createdAt])
   @@index([repoName, prNumber])
 }
 
+// ✅ Webhook 受信ログ（冪等性の本体）
+model GithubWebhookDelivery {
+  id String @id @default(cuid())
+
+  // x-github-delivery（冪等性キー）
+  deliveryId String @unique
+
+  // x-github-event（例: pull_request）
+  eventName String
+
+  // x-hub-signature-256（prodのみ検証するが、保存しておくと調査が楽）
+  signature256 String?
+
+  receivedAt DateTime @default(now())
+
+  // この delivery が最終的に紐づいた GithubEvent（任意）
+  githubEventId String?
+  githubEvent   GithubEvent? @relation(fields: [githubEventId], references: [id])
+
+  // 調査用に payload を保持
+  rawPayload Json
+
+  @@index([eventName, receivedAt])
+  @@index([githubEventId])
+}
+
 // GitHub イベントをもとに行った SNS / Webhook 投稿ログ
 model SnsPost {
-  id           String       @id @default(cuid())
+  id String @id @default(cuid())
 
-  eventId      String
-  event        GithubEvent  @relation(fields: [eventId], references: [id])
+  eventId String
+  event   GithubEvent @relation(fields: [eventId], references: [id])
 
-  platform     String       // "webhook" | "x" | "bluesky" など
-  content      String       // 実際に投稿した（しようとした）本文
-  status       String       // "SUCCESS" | "FAILED" | "SKIPPED"
+  platform     String // "webhook" | "x" | "bluesky" など
+  content      String // 実際に投稿した（しようとした）本文
+  status       String // "SUCCESS" | "FAILED" | "SKIPPED"
   externalId   String?
   errorMessage String?
 
-  createdAt    DateTime     @default(now())
+  createdAt DateTime @default(now())
 
   @@index([eventId, createdAt])
 }
