@@ -40,6 +40,8 @@ model GithubEvent {
   prTitle          String
   prUrl            String       // GitHub 上の PR URL
   mergedBy         String?      // マージしたユーザー名 (login)。不明なら null
+  mergedAt         DateTime?
+  mergeCommitSha   String?
 
   // Webhook の payload 丸ごと
   rawPayload       Json
