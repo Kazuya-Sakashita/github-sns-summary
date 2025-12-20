@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/server/db/client"
 import { verifyGithubSignature } from "@/lib/github/verifySignature"
 import { revalidatePath } from "next/cache"
-import type { Prisma } from "@prisma/client"
+import { Prisma } from "@prisma/client"
 
 type PullRequestMergedPayload = {
   action: string
@@ -36,28 +36,63 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Owner user not found" }, { status: 500 })
   }
 
-  // delivery id（重複対策の主キー）
+  // headers
   const deliveryId = req.headers.get("x-github-delivery")
   if (!deliveryId) {
     return NextResponse.json({ error: "Missing x-github-delivery header" }, { status: 400 })
   }
 
-  const eventName = req.headers.get("x-github-event")
+  const eventName = req.headers.get("x-github-event") ?? "unknown"
   const signature256 = req.headers.get("x-hub-signature-256")
+
+  // raw body
   const rawBody = await req.text()
 
   // prod: 署名検証
   const isDev = process.env.NODE_ENV !== "production"
   if (!isDev) {
     const valid = verifyGithubSignature({ secret, payload: rawBody, signature256 })
-    if (!valid) return NextResponse.json({ error: "Invalid signature" }, { status: 401 })
+    if (!valid) {
+      // 署名NGはログ残すかは好み。残したいならここでも create を試してOK。
+      return NextResponse.json({ error: "Invalid signature" }, { status: 401 })
+    }
   }
 
-  // pull_request 以外は無視
+  // ---- ここが “強い冪等性” の本体（insert-first） ----
+  let deliveryLogId: string | null = null
+  try {
+    const created = await prisma.githubWebhookDelivery.create({
+      data: {
+        deliveryId,
+        eventName,
+        signature256,
+        rawPayload: (() => {
+          try {
+            return JSON.parse(rawBody) as Prisma.InputJsonValue
+          } catch {
+            // JSON不正でも調査できるように文字列で残す（Json型に string は入る）
+            return rawBody as unknown as Prisma.InputJsonValue
+          }
+        })(),
+      },
+      select: { id: true },
+    })
+    deliveryLogId = created.id
+  } catch (e) {
+    // unique衝突 = 既に処理した deliveryId
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+      return NextResponse.json({ ok: true, duplicated: true, deliveryId })
+    }
+    console.error("[github-webhook] failed to create delivery log", e)
+    return NextResponse.json({ error: "Failed to log delivery" }, { status: 500 })
+  }
+
+  // pull_request 以外は無視（ログは残っている）
   if (eventName !== "pull_request") {
     return NextResponse.json({ ok: true, ignored: true, reason: "not pull_request" })
   }
 
+  // JSON parse
   let payload: PullRequestMergedPayload
   try {
     payload = JSON.parse(rawBody) as PullRequestMergedPayload
@@ -67,7 +102,7 @@ export async function POST(req: NextRequest) {
 
   const { action, pull_request, repository } = payload
 
-  // ✅ マージ以外は保存しない（方針どおり）
+  // マージ以外は保存しない
   if (action !== "closed" || !pull_request.merged) {
     return NextResponse.json({ ok: true, ignored: true, reason: "not merged PR" })
   }
@@ -77,16 +112,7 @@ export async function POST(req: NextRequest) {
   const mergedAt = pull_request.merged_at ? new Date(pull_request.merged_at) : null
   const mergeCommitSha = pull_request.merge_commit_sha ?? null
 
-  // ✅ 二重防止1: deliveryId が同一なら即終了
-  const already = await prisma.githubEvent.findUnique({
-    where: { githubDeliveryId: deliveryId },
-    select: { id: true },
-  })
-  if (already) {
-    return NextResponse.json({ ok: true, duplicated: true, id: already.id })
-  }
-
-  // ✅ 二重防止2: 同じPRは upsert で1件に収束（@@unique([userId, repoName, prNumber]) が必要）
+  // upsert（同一PRは1件に収束）
   try {
     const saved = await prisma.githubEvent.upsert({
       where: {
@@ -117,12 +143,20 @@ export async function POST(req: NextRequest) {
         rawPayload: payload as unknown as Prisma.InputJsonValue,
         // githubDeliveryId は unique なので update しない
       },
+      select: { id: true },
+    })
+
+    // delivery log に紐付け（調査性UP）
+    await prisma.githubWebhookDelivery.update({
+      where: { id: deliveryLogId },
+      data: { githubEventId: saved.id },
     })
 
     revalidatePath("/dashboard")
     return NextResponse.json({ ok: true, id: saved.id })
   } catch (err) {
     console.error("[github-webhook] failed to upsert event", err)
+    // 失敗しても delivery log は残ってるので追跡できる
     return NextResponse.json({ error: "Failed to save event" }, { status: 500 })
   }
 }
