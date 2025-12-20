@@ -10,7 +10,7 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier . --check",
     "format:fix": "prettier . --write",
-    "prisma:seed": "ts-node prisma/seed.ts",
+    "prisma:seed": "ts-node --esm prisma/seed.ts",
     "typecheck": "tsc --noEmit",
     "prisma:backfill:delivery": "ts-node --esm prisma/backfill_github_delivery_id.ts"
   },

@@ -1,6 +1,6 @@
 // prisma/seed.ts
 import "dotenv/config"
-import { PrismaClient } from "@prisma/client"
+import { PrismaClient, Prisma } from "@prisma/client"
 import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3"
 import { randomUUID } from "crypto"
 
@@ -23,36 +23,49 @@ function minutesAgo(min: number) {
  * - seed は衝突しないよう UUID を使う
  */
 function seedDeliveryId(label: string) {
+  // x-github-delivery は UUID 形式っぽいことが多いので寄せてもOK
   return `seed-${label}-${randomUUID()}`
 }
 
-async function main() {
-  // 1. User を準備（既存があればそれを使う）
-  let user = await prisma.user.findFirst()
+/**
+ * cuid運用で「Owner を必ず 1人」に寄せる。
+ * - OWNER_USER_ID があれば、その User を必ず使う（無ければ作らない・エラー）
+ * - OWNER_USER_ID が無ければ、既存 user がいればそれを使う / 無ければ作る
+ */
+async function resolveOwnerUser() {
+  const ownerUserId = process.env.OWNER_USER_ID
 
-  if (user) {
-    console.log("User already exists:")
-    console.log("id  :", user.id)
-    console.log("name:", user.name)
-  } else {
-    user = await prisma.user.create({
-      data: {
-        name: "Owner",
-      },
-    })
-
-    console.log("Created owner user:")
-    console.log("id  :", user.id)
-    console.log("name:", user.name)
+  if (ownerUserId) {
+    const owner = await prisma.user.findUnique({ where: { id: ownerUserId } })
+    if (!owner) {
+      throw new Error(`OWNER_USER_ID is set but user not found. OWNER_USER_ID="${ownerUserId}"`)
+    }
+    return owner
   }
 
-  console.log("\nYou can set OWNER_USER_ID in .env as:")
-  console.log(`OWNER_USER_ID="${user.id}"`)
+  // OWNER_USER_ID 未指定なら既存の先頭を使う（なければ作る）
+  const existing = await prisma.user.findFirst({ orderBy: { createdAt: "asc" } })
+  if (existing) return existing
 
-  // 2. 既存のイベント＆投稿ログを一旦クリアしてクリーンな状態にする
-  console.log("\nClearing existing events/posts for this user ...")
-  await prisma.snsPost.deleteMany({ where: { event: { userId: user.id } } })
-  await prisma.githubEvent.deleteMany({ where: { userId: user.id } })
+  return prisma.user.create({
+    data: { name: "Owner" },
+  })
+}
+
+async function main() {
+  const owner = await resolveOwnerUser()
+
+  console.log("Owner user:")
+  console.log("id  :", owner.id)
+  console.log("name:", owner.name)
+
+  console.log("\nSet OWNER_USER_ID in .env as:")
+  console.log(`OWNER_USER_ID="${owner.id}"`)
+
+  // 既存のイベント＆投稿ログを一旦クリアしてクリーンな状態にする（Owner分だけ）
+  console.log("\nClearing existing events/posts for this owner ...")
+  await prisma.snsPost.deleteMany({ where: { event: { userId: owner.id } } })
+  await prisma.githubEvent.deleteMany({ where: { userId: owner.id } })
 
   console.log("Seeding GithubEvent + SnsPost ...\n")
 
@@ -68,24 +81,32 @@ async function main() {
    *   webhook 状態を見せたいカードでは webhook の post を "最新" にする必要がある
    */
 
+  // ※ mergedAt / mergeCommitSha は Issue #22 に合わせて seed にも入れておく
+  //    （本番では GitHub webhook payload から入る）
+
   // -----------------------------
   // A) 未送信：ai-preview だけ（webhook post なし）
   // -----------------------------
   await prisma.githubEvent.create({
     data: {
-      githubDeliveryId: seedDeliveryId("unsent"), // ✅ 追加
-      userId: user.id,
+      githubDeliveryId: seedDeliveryId("unsent"),
+      userId: owner.id,
       repoName: "owner/repository-name",
       prNumber: 123,
       prTitle: "新機能: ユーザー認証システムの実装と UI の改善",
       prUrl: "https://github.com/owner/repository-name/pull/123",
       mergedBy: "tanaka-taro",
+      mergedAt: minutesAgo(70),
+      mergeCommitSha: `seed-unsent-${randomUUID().replace(/-/g, "")}`,
       rawPayload: {
         sample: true,
         type: "pull_request",
         action: "closed",
         merged: true,
-      },
+        merged_by: { login: "tanaka-taro" },
+        merged_at: minutesAgo(70).toISOString(),
+        merge_commit_sha: "seed-unsent",
+      } satisfies Prisma.InputJsonValue,
       createdAt: minutesAgo(60),
       posts: {
         create: [
@@ -107,18 +128,23 @@ async function main() {
   await prisma.githubEvent.create({
     data: {
       githubDeliveryId: seedDeliveryId("success"),
-      userId: user.id,
+      userId: owner.id,
       repoName: "owner/api-server",
       prNumber: 87,
       prTitle: "バグ修正: データベース接続エラーのハンドリング",
       prUrl: "https://github.com/owner/api-server/pull/87",
       mergedBy: "suzuki-hanako",
+      mergedAt: minutesAgo(50),
+      mergeCommitSha: `seed-success-${randomUUID().replace(/-/g, "")}`,
       rawPayload: {
         sample: true,
         type: "pull_request",
         action: "closed",
         merged: true,
-      },
+        merged_by: { login: "suzuki-hanako" },
+        merged_at: minutesAgo(50).toISOString(),
+        merge_commit_sha: "seed-success",
+      } satisfies Prisma.InputJsonValue,
       createdAt: minutesAgo(40),
       posts: {
         create: [
@@ -149,19 +175,24 @@ async function main() {
   // -----------------------------
   await prisma.githubEvent.create({
     data: {
-      githubDeliveryId: seedDeliveryId("failed"), // ✅ 追加
-      userId: user.id,
+      githubDeliveryId: seedDeliveryId("failed"),
+      userId: owner.id,
       repoName: "owner/frontend-app",
       prNumber: 234,
       prTitle: "パフォーマンス改善: 画像の遅延読み込みを実装",
       prUrl: "https://github.com/owner/frontend-app/pull/234",
       mergedBy: "yamada-ichiro",
+      mergedAt: minutesAgo(30),
+      mergeCommitSha: `seed-failed-${randomUUID().replace(/-/g, "")}`,
       rawPayload: {
         sample: true,
         type: "pull_request",
         action: "closed",
         merged: true,
-      },
+        merged_by: { login: "yamada-ichiro" },
+        merged_at: minutesAgo(30).toISOString(),
+        merge_commit_sha: "seed-failed",
+      } satisfies Prisma.InputJsonValue,
       createdAt: minutesAgo(20),
       posts: {
         create: [
