@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/server/db/client"
 import { verifyGithubSignature } from "@/lib/github/verifySignature"
 import { revalidatePath } from "next/cache"
+import type { Prisma } from "@prisma/client"
 
 type PullRequestMergedPayload = {
   action: string
@@ -11,6 +12,8 @@ type PullRequestMergedPayload = {
     html_url: string
     merged: boolean
     merged_by: { login: string } | null
+    merged_at: string | null
+    merge_commit_sha: string | null
   }
   repository: { full_name: string }
 }
@@ -57,17 +60,22 @@ export async function POST(req: NextRequest) {
 
   let payload: PullRequestMergedPayload
   try {
-    payload = JSON.parse(rawBody)
+    payload = JSON.parse(rawBody) as PullRequestMergedPayload
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 })
   }
 
   const { action, pull_request, repository } = payload
 
-  // ✅ マージ以外は保存しない
+  // ✅ マージ以外は保存しない（方針どおり）
   if (action !== "closed" || !pull_request.merged) {
     return NextResponse.json({ ok: true, ignored: true, reason: "not merged PR" })
   }
+
+  // merge 情報
+  const mergedBy = pull_request.merged_by?.login ?? null
+  const mergedAt = pull_request.merged_at ? new Date(pull_request.merged_at) : null
+  const mergeCommitSha = pull_request.merge_commit_sha ?? null
 
   // ✅ 二重防止1: deliveryId が同一なら即終了
   const already = await prisma.githubEvent.findUnique({
@@ -95,21 +103,23 @@ export async function POST(req: NextRequest) {
         prNumber: pull_request.number,
         prTitle: pull_request.title,
         prUrl: pull_request.html_url,
-        mergedBy: pull_request.merged_by?.login ?? null,
-        rawPayload: payload as unknown as object,
+        mergedBy,
+        mergedAt,
+        mergeCommitSha,
+        rawPayload: payload as unknown as Prisma.InputJsonValue,
       },
       update: {
         prTitle: pull_request.title,
         prUrl: pull_request.html_url,
-        mergedBy: pull_request.merged_by?.login ?? null,
-        rawPayload: payload as unknown as object,
+        mergedBy,
+        mergedAt,
+        mergeCommitSha,
+        rawPayload: payload as unknown as Prisma.InputJsonValue,
         // githubDeliveryId は unique なので update しない
       },
     })
 
-    // ✅ ダッシュボード更新
     revalidatePath("/dashboard")
-
     return NextResponse.json({ ok: true, id: saved.id })
   } catch (err) {
     console.error("[github-webhook] failed to upsert event", err)
