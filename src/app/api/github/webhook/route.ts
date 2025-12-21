@@ -20,6 +20,13 @@ type PullRequestMergedPayload = {
   repository: { full_name: string }
 }
 
+type DeliveryLog = {
+  id: string
+  status: WebhookDeliveryStatus
+  attemptCount: number
+  githubEventId: string | null
+}
+
 function isKnownRequestError(e: unknown): e is Prisma.PrismaClientKnownRequestError {
   return e instanceof Prisma.PrismaClientKnownRequestError
 }
@@ -38,6 +45,40 @@ function toErrorMessage(err: unknown): string {
   }
 }
 
+function parseRawPayload(rawBody: string): Prisma.InputJsonValue {
+  try {
+    return JSON.parse(rawBody) as Prisma.InputJsonValue
+  } catch {
+    // Json カラムに string も入る（PrismaのJsonValue）
+    return rawBody as unknown as Prisma.InputJsonValue
+  }
+}
+
+function isObjectPayload(rawPayload: Prisma.InputJsonValue): rawPayload is Prisma.JsonObject {
+  return typeof rawPayload === "object" && rawPayload !== null && !Array.isArray(rawPayload)
+}
+
+/**
+ * pull_request の最低限の shape チェック
+ * - ここを通れば payload.action / payload.pull_request / payload.repository を安全に参照できる
+ */
+function isPullRequestMergedPayload(x: Prisma.JsonObject): x is PullRequestMergedPayload {
+  const o = x as Record<string, unknown>
+  const pr = o["pull_request"] as Record<string, unknown> | undefined
+  const repo = o["repository"] as Record<string, unknown> | undefined
+
+  return (
+    typeof o["action"] === "string" &&
+    !!pr &&
+    typeof pr["number"] === "number" &&
+    typeof pr["title"] === "string" &&
+    typeof pr["html_url"] === "string" &&
+    typeof pr["merged"] === "boolean" &&
+    !!repo &&
+    typeof repo["full_name"] === "string"
+  )
+}
+
 /**
  * delivery log を作成 or 既存取得（レース対策込み）
  */
@@ -46,18 +87,17 @@ async function findOrCreateDeliveryLog(params: {
   eventName: string
   signature256: string | null
   rawPayload: Prisma.InputJsonValue
-}) {
+}): Promise<DeliveryLog> {
   const { deliveryId, eventName, signature256, rawPayload } = params
 
-  let delivery = await prisma.githubWebhookDelivery.findUnique({
+  const existing = await prisma.githubWebhookDelivery.findUnique({
     where: { deliveryId },
     select: { id: true, status: true, attemptCount: true, githubEventId: true },
   })
-
-  if (delivery) return delivery
+  if (existing) return existing
 
   try {
-    delivery = await prisma.githubWebhookDelivery.create({
+    return await prisma.githubWebhookDelivery.create({
       data: {
         deliveryId,
         eventName,
@@ -68,7 +108,6 @@ async function findOrCreateDeliveryLog(params: {
       },
       select: { id: true, status: true, attemptCount: true, githubEventId: true },
     })
-    return delivery
   } catch (e) {
     if (isKnownRequestError(e) && e.code === "P2002") {
       // create レース → 取り直し
@@ -111,20 +150,12 @@ export async function POST(req: NextRequest) {
 
   // raw body
   const rawBody = await req.text()
-
-  // rawPayload を “必ず” 何かしら残す（JSON不正でも文字列で残す）
-  const rawPayload: Prisma.InputJsonValue = (() => {
-    try {
-      return JSON.parse(rawBody) as Prisma.InputJsonValue
-    } catch {
-      return rawBody as unknown as Prisma.InputJsonValue
-    }
-  })()
+  const rawPayload = parseRawPayload(rawBody)
 
   // =====================================================
   // 1) delivery log を確実に作る / 既存を取得する
   // =====================================================
-  let delivery
+  let delivery: DeliveryLog
   try {
     delivery = await findOrCreateDeliveryLog({
       deliveryId,
@@ -137,7 +168,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Failed to log delivery" }, { status: 500 })
   }
 
-  // 完了済みは即終了
+  // 完了済みは即終了（PROCESSED / IGNORED）
   if (shouldShortCircuit(delivery.status)) {
     return NextResponse.json({
       ok: true,
@@ -151,6 +182,7 @@ export async function POST(req: NextRequest) {
 
   // =====================================================
   // 2) 今回の試行を記録（attemptCount++, lastAttemptAt, status=RECEIVED）
+  // - processedAt は “完了時のみ” set（ここで null にしない）
   // =====================================================
   await prisma.githubWebhookDelivery.update({
     where: { deliveryId },
@@ -167,7 +199,7 @@ export async function POST(req: NextRequest) {
 
   // =====================================================
   // 2.5) 署名検証（本番のみ）
-  // - 署名NGでも delivery log を FAILED にして残す（調査性を上げる）
+  // - 署名NGでも delivery log を FAILED にして残す（調査性UP）
   // =====================================================
   const isDev = process.env.NODE_ENV !== "production"
   if (!isDev) {
@@ -199,11 +231,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, ignored: true, reason: "not pull_request" })
   }
 
-  // JSON parse（pull_request として扱う）
-  let payload: PullRequestMergedPayload
-  try {
-    payload = JSON.parse(rawBody) as PullRequestMergedPayload
-  } catch {
+  // =====================================================
+  // 3.5) pull_request なのに JSON が壊れてる → FAILED
+  // =====================================================
+  if (!isObjectPayload(rawPayload)) {
     await prisma.githubWebhookDelivery.update({
       where: { deliveryId },
       data: {
@@ -215,6 +246,23 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 })
   }
 
+  // =====================================================
+  // 3.6) JSONはobjectだが、想定shapeではない → FAILED（障害調査しやすく）
+  // =====================================================
+  if (!isPullRequestMergedPayload(rawPayload)) {
+    await prisma.githubWebhookDelivery.update({
+      where: { deliveryId },
+      data: {
+        status: "FAILED",
+        processedAt: new Date(),
+        errorMessage: "Invalid payload shape",
+      },
+    })
+    return NextResponse.json({ error: "Invalid payload shape" }, { status: 400 })
+  }
+
+  // ここで payload は型安全
+  const payload = rawPayload
   const { action, pull_request, repository } = payload
 
   // マージ以外は保存しない → IGNORED
@@ -236,50 +284,56 @@ export async function POST(req: NextRequest) {
 
   // =====================================================
   // 4) 本処理（GithubEvent upsert）→ 成功/失敗を delivery に反映
+  // - upsert と status 更新を transaction でまとめる（整合性UP）
   // =====================================================
   try {
-    const saved = await prisma.githubEvent.upsert({
-      where: {
-        userId_repoName_prNumber: {
+    const result = await prisma.$transaction(async (tx) => {
+      const saved = await tx.githubEvent.upsert({
+        where: {
+          userId_repoName_prNumber: {
+            userId: ownerUserId,
+            repoName: repository.full_name,
+            prNumber: pull_request.number,
+          },
+        },
+        create: {
+          githubDeliveryId: deliveryId,
           userId: ownerUserId,
           repoName: repository.full_name,
           prNumber: pull_request.number,
+          prTitle: pull_request.title,
+          prUrl: pull_request.html_url,
+          mergedBy,
+          mergedAt,
+          mergeCommitSha,
+          rawPayload: payload as unknown as Prisma.InputJsonValue,
         },
-      },
-      create: {
-        githubDeliveryId: deliveryId,
-        userId: ownerUserId,
-        repoName: repository.full_name,
-        prNumber: pull_request.number,
-        prTitle: pull_request.title,
-        prUrl: pull_request.html_url,
-        mergedBy,
-        mergedAt,
-        mergeCommitSha,
-        rawPayload: payload as unknown as Prisma.InputJsonValue,
-      },
-      update: {
-        prTitle: pull_request.title,
-        prUrl: pull_request.html_url,
-        mergedBy,
-        mergedAt,
-        mergeCommitSha,
-        rawPayload: payload as unknown as Prisma.InputJsonValue,
-      },
-      select: { id: true },
-    })
+        update: {
+          prTitle: pull_request.title,
+          prUrl: pull_request.html_url,
+          mergedBy,
+          mergedAt,
+          mergeCommitSha,
+          rawPayload: payload as unknown as Prisma.InputJsonValue,
+        },
+        select: { id: true },
+      })
 
-    await prisma.githubWebhookDelivery.update({
-      where: { deliveryId },
-      data: {
-        status: "PROCESSED",
-        processedAt: new Date(),
-        githubEventId: saved.id,
-      },
+      await tx.githubWebhookDelivery.update({
+        where: { deliveryId },
+        data: {
+          status: "PROCESSED",
+          processedAt: new Date(),
+          githubEventId: saved.id,
+          errorMessage: null,
+        },
+      })
+
+      return saved
     })
 
     revalidatePath("/dashboard")
-    return NextResponse.json({ ok: true, id: saved.id })
+    return NextResponse.json({ ok: true, id: result.id })
   } catch (err) {
     const msg = toErrorMessage(err)
     console.error("[github-webhook] failed to upsert event", err)
