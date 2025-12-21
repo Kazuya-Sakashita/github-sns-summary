@@ -12,6 +12,16 @@ generator client {
   provider = "prisma-client-js"
 }
 
+// ==================== Enums ====================
+
+// ✅ Webhook 受信ログの処理ステータス
+enum WebhookDeliveryStatus {
+  RECEIVED // 受信してログは作った（処理前）
+  PROCESSED // 本処理まで成功
+  FAILED // 本処理が失敗
+  IGNORED // 対象外イベントなどで処理しなかった
+}
+
 // ==================== Models ====================
 
 // アプリ内ユーザー
@@ -73,7 +83,27 @@ model GithubWebhookDelivery {
   // x-hub-signature-256（prodのみ検証するが、保存しておくと調査が楽）
   signature256 String?
 
+  // ✅ 受信時刻（最初に受け取った時刻）
   receivedAt DateTime @default(now())
+
+  // =========================
+  // ✅ #25 追加: 処理結果・再実行用
+  // =========================
+
+  // 現在の状態
+  status WebhookDeliveryStatus @default(RECEIVED)
+
+  // 何回処理を試みたか（FAILEDの再送/再処理に備える）
+  attemptCount Int @default(0)
+
+  // 最後に処理を試みた時刻
+  lastAttemptAt DateTime?
+
+  // 処理が完了した時刻（PROCESSED / IGNORED のときに入れる想定）
+  processedAt DateTime?
+
+  // 失敗理由（FAILED のときに入れる）
+  errorMessage String?
 
   // この delivery が最終的に紐づいた GithubEvent（任意）
   githubEventId String?
@@ -84,6 +114,7 @@ model GithubWebhookDelivery {
 
   @@index([eventName, receivedAt])
   @@index([githubEventId])
+  @@index([status, receivedAt])
 }
 
 // GitHub イベントをもとに行った SNS / Webhook 投稿ログ
