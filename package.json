@@ -12,7 +12,10 @@
     "format:fix": "prettier . --write",
     "prisma:seed": "ts-node --esm prisma/seed.ts",
     "typecheck": "tsc --noEmit",
-    "prisma:backfill:delivery": "ts-node --esm prisma/backfill_github_delivery_id.ts"
+    "prisma:backfill:delivery": "ts-node --esm prisma/backfill_github_delivery_id.ts",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@prisma/adapter-better-sqlite3": "^7.1.0",
@@ -72,6 +75,7 @@
     "@types/node": "^20.19.25",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@vitest/coverage-v8": "^4.0.16",
     "eslint": "^9",
     "eslint-config-next": "16.0.7",
     "eslint-config-prettier": "^10.1.8",
@@ -81,6 +85,7 @@
     "smee-client": "^5.0.0",
     "tailwindcss": "^4",
     "ts-node": "^10.9.2",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.16"
   }
 }
