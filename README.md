@@ -1,36 +1,144 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# github-sns-summary（Webhook 検証メモ / README）
 
-## Getting Started
+GitHub の Webhook（pull_request の merged）を受け取り、SQLite に保存・重複排除しつつ、失敗した delivery を手動でリトライできる仕組みを検証する。
 
-First, run the development server:
+---
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## 必要なもの
+
+- Node.js / npm
+- SQLite（sqlite3 コマンド）
+- ngrok（ローカルを外部公開するため）
+
+---
+
+## 環境変数（.env）
+
+例：
+
+```env
+DATABASE_URL="file:./dev.db"
+
+OWNER_USER_ID="cmje473qy0000tsu6e5kpkcpg"
+GITHUB_WEBHOOK_SECRET="change-me-please"
+
+SNS_WEBHOOK_URL="https://webhook.site/xxxx"
+WEBHOOK_RETRY_API_KEY="dev-retry-key"
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+---
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## 起動（ローカル）
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm install
+npm run dev
+```
 
-## Learn More
+疎通（GET は 405 でOK）:
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+curl -i http://localhost:3000/api/github/webhook | head
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+ngrok（ローカルを GitHub から叩けるようにする）
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+ngrok http 3000
+```
 
-## Deploy on Vercel
+表示される URL を控える：
+例）`https://xxxxxxxxxxxx.ngrok-free.app`
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Webhook の受け口は以下：
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `https://xxxxxxxxxxxx.ngrok-free.app/api/github/webhook`
+
+---
+
+## GitHub Webhook 設定
+
+Repository:
+
+- Settings → Webhooks → Add webhook
+- Payload URL: https://xxxxxxxxxxxx.ngrok-free.app/api/github/webhook
+- Content type: application/json
+- Secret: .env の GITHUB_WEBHOOK_SECRET と同じ値
+- Events: Pull requests（必要なら ping も）
+
+---
+
+## 動作確認（DB）
+
+### Delivery（Webhook 受信ログ）
+
+```bash
+sqlite3 dev.db "
+SELECT deliveryId, eventName, status, attemptCount, errorMessage
+FROM GithubWebhookDelivery
+ORDER BY receivedAt DESC
+LIMIT 10;
+"
+```
+
+### GithubEvent（PR merged から生成されるイベント）
+
+```bash
+sqlite3 dev.db "
+SELECT id, githubDeliveryId, repoName, prNumber, mergedBy, mergeCommitSha
+FROM GithubEvent
+ORDER BY createdAt DESC
+LIMIT 10;
+"
+```
+
+### 期待する挙動
+
+ping は保存されるが処理対象外（IGNORED）
+
+- eventName=ping
+- status=IGNORED
+
+pull_request(merged) は PROCESSED になり GithubEvent が作られる
+
+- GithubWebhookDelivery.status=PROCESSED
+- GithubWebhookDelivery.githubEventId が入る
+- GithubEvent が 1 件作成される
+
+### 重複排除（同じ deliveryId を再送しても 1 件）
+
+- 同じ deliveryId を再送すると API は duplicated: true を返す
+- DB の attemptCount は増えない
+
+### 手動リトライ API（FAILED の delivery を再処理）
+
+POST /api/github/webhook/retry
+Headers:
+
+- x-retry-api-key: <WEBHOOK_RETRY_API_KEY>
+
+Body:
+
+```json
+{ "deliveryId": "xxxx", "force": false }
+```
+
+例：
+
+```bash
+curl -sS -X POST "http://localhost:3000/api/github/webhook/retry" \
+  -H "content-type: application/json" \
+  -H "x-retry-api-key: dev-retry-key" \
+  --data '{"deliveryId":"test-failed-then-ok-002"}'
+echo
+```
+
+---
+
+### テスト（Vitest + SQLite）
+
+```bash
+npm run test
+```
+
+test.db を使って Prisma を db push --force-reset し、API の integration test を実行する。
