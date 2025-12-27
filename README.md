@@ -142,3 +142,73 @@ npm run test
 ```
 
 test.db を使って Prisma を db push --force-reset し、API の integration test を実行する。
+
+## ローカルで GitHub Webhook を本番同様に確認する（ngrok + 署名検証）
+
+### 前提
+
+- `.env` に `GITHUB_WEBHOOK_SECRET`, `OWNER_USER_ID` を設定済み
+- `ngrok http 3000` で公開URLを取得済み（例: `https://xxxx.ngrok-free.app`）
+
+### 起動
+
+```bash
+npm run dev
+ngrok http 3000
+```
+
+### 署名付きで webhook を送る（推奨）
+
+```baash
+
+export NGROK_BASE="https://xxxx.ngrok-free.app"
+export GITHUB_WEBHOOK_SECRET="(your secret)"
+
+./scripts/webhook-send.sh ping ping-001 '{"zen":"hello"}'
+
+```
+
+### pull_request(merged) を送る
+
+```bash
+payload='{
+  "action":"closed",
+  "pull_request":{
+    "number":12345,
+    "title":"test",
+    "html_url":"https://github.com/owner/repo/pull/12345",
+    "merged":true,
+    "merged_by":{"login":"tester"},
+    "merged_at":"2025-12-21T00:00:00Z",
+    "merge_commit_sha":"sha"
+  },
+  "repository":{"full_name":"owner/repo"}
+}'
+
+./scripts/webhook-send.sh pull_request pr-001 "$payload"
+
+```
+
+### DB で結果確認
+
+```bash
+sqlite3 dev.db "
+SELECT deliveryId, eventName, status, attemptCount, errorMessage
+FROM GithubWebhookDelivery
+ORDER BY receivedAt DESC
+LIMIT 10;
+"
+
+sqlite3 dev.db "
+SELECT id, githubDeliveryId, repoName, prNumber, mergedBy, mergeCommitSha
+FROM GithubEvent
+ORDER BY mergedAt DESC
+LIMIT 10;
+"
+```
+
+### 署名エラーの期待挙動
+
+- x-hub-signature-256 が無い → 401 / reason=missing_header
+- secret が違う → 401 / reason=mismatch
+- いずれも GithubWebhookDelivery.status=FAILED に記録される
