@@ -49,7 +49,6 @@ function parseRawPayload(rawBody: string): Prisma.InputJsonValue {
   try {
     return JSON.parse(rawBody) as Prisma.InputJsonValue
   } catch {
-    // Json カラムに string も入る（PrismaのJsonValue）
     return rawBody as unknown as Prisma.InputJsonValue
   }
 }
@@ -60,7 +59,6 @@ function isObjectPayload(rawPayload: Prisma.InputJsonValue): rawPayload is Prism
 
 /**
  * pull_request の最低限の shape チェック
- * - ここを通れば payload.action / payload.pull_request / payload.repository を安全に参照できる
  */
 function isPullRequestMergedPayload(x: Prisma.JsonObject): x is PullRequestMergedPayload {
   const o = x as Record<string, unknown>
@@ -110,7 +108,6 @@ async function findOrCreateDeliveryLog(params: {
     })
   } catch (e) {
     if (isKnownRequestError(e) && e.code === "P2002") {
-      // create レース → 取り直し
       const again = await prisma.githubWebhookDelivery.findUnique({
         where: { deliveryId },
         select: { id: true, status: true, attemptCount: true, githubEventId: true },
@@ -148,7 +145,7 @@ export async function POST(req: NextRequest) {
   const eventName = req.headers.get("x-github-event") ?? "unknown"
   const signature256 = req.headers.get("x-hub-signature-256")
 
-  // raw body
+  // raw body（署名検証のために必ず text）
   const rawBody = await req.text()
   const rawPayload = parseRawPayload(rawBody)
 
@@ -182,7 +179,6 @@ export async function POST(req: NextRequest) {
 
   // =====================================================
   // 2) 今回の試行を記録（attemptCount++, lastAttemptAt, status=RECEIVED）
-  // - processedAt は “完了時のみ” set（ここで null にしない）
   // =====================================================
   await prisma.githubWebhookDelivery.update({
     where: { deliveryId },
@@ -198,22 +194,26 @@ export async function POST(req: NextRequest) {
   })
 
   // =====================================================
-  // 2.5) 署名検証（本番のみ）
-  // - 署名NGでも delivery log を FAILED にして残す（調査性UP）
+  // 2.5) 署名検証（厳密化）
+  // - 原則: 常に検証（missing/format/mismatch も 401）
+  // - 例外: SKIP_GITHUB_SIGNATURE_VERIFY=1 のときだけスキップ
   // =====================================================
-  const isDev = process.env.NODE_ENV !== "production"
-  if (!isDev) {
-    const valid = verifyGithubSignature({ secret, payload: rawBody, signature256 })
-    if (!valid) {
+  const skipVerify = process.env.SKIP_GITHUB_SIGNATURE_VERIFY === "1"
+  if (!skipVerify) {
+    const verified = verifyGithubSignature({ secret, payload: rawBody, signature256 })
+    if (!verified.ok) {
       await prisma.githubWebhookDelivery.update({
         where: { deliveryId },
         data: {
           status: "FAILED",
           processedAt: new Date(),
-          errorMessage: "Invalid signature",
+          errorMessage: `Invalid signature: ${verified.reason}`,
         },
       })
-      return NextResponse.json({ error: "Invalid signature" }, { status: 401 })
+      return NextResponse.json(
+        { error: "Invalid signature", reason: verified.reason },
+        { status: 401 },
+      )
     }
   }
 
@@ -247,7 +247,7 @@ export async function POST(req: NextRequest) {
   }
 
   // =====================================================
-  // 3.6) JSONはobjectだが、想定shapeではない → FAILED（障害調査しやすく）
+  // 3.6) JSONはobjectだが、想定shapeではない → FAILED
   // =====================================================
   if (!isPullRequestMergedPayload(rawPayload)) {
     await prisma.githubWebhookDelivery.update({
@@ -261,7 +261,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid payload shape" }, { status: 400 })
   }
 
-  // ここで payload は型安全
   const payload = rawPayload
   const { action, pull_request, repository } = payload
 
@@ -277,14 +276,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, ignored: true, reason: "not merged PR" })
   }
 
-  // merge 情報
   const mergedBy = pull_request.merged_by?.login ?? null
   const mergedAt = pull_request.merged_at ? new Date(pull_request.merged_at) : null
   const mergeCommitSha = pull_request.merge_commit_sha ?? null
 
   // =====================================================
-  // 4) 本処理（GithubEvent upsert）→ 成功/失敗を delivery に反映
-  // - upsert と status 更新を transaction でまとめる（整合性UP）
+  // 4) 本処理（GithubEvent upsert）→ delivery に反映
   // =====================================================
   try {
     const result = await prisma.$transaction(async (tx) => {
