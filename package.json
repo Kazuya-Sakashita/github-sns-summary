@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "dotenv -e .env -- next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
@@ -13,7 +13,7 @@
     "prisma:seed": "ts-node --esm prisma/seed.ts",
     "typecheck": "tsc --noEmit",
     "prisma:backfill:delivery": "ts-node --esm prisma/backfill_github_delivery_id.ts",
-    "test": "vitest",
+    "test": "dotenv -e .env -- vitest",
     "test:run": "vitest run",
     "test:watch": "vitest"
   },
@@ -76,6 +76,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@vitest/coverage-v8": "^4.0.16",
+    "dotenv-cli": "^11.0.0",
     "eslint": "^9",
     "eslint-config-next": "16.0.7",
     "eslint-config-prettier": "^10.1.8",
