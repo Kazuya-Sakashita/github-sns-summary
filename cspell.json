@@ -9,7 +9,9 @@
     "webhook",
     "idempotency",
     "deliveryid",
-    "githubdeliveryid"
+    "githubdeliveryid",
+    "ngrok",
+    "signedsha"
   ],
   "ignorePaths": [
     "**/node_modules/**",
