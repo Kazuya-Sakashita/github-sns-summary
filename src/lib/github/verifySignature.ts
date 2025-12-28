@@ -1,29 +1,50 @@
 // src/lib/github/verifySignature.ts
-import crypto from "node:crypto"
+import { createHmac, timingSafeEqual } from "node:crypto"
 
-export function verifyGithubSignature(opts: {
+export type VerifyGithubSignatureResult =
+  | { ok: true }
+  | {
+      ok: false
+      reason:
+        | "missing_header"
+        | "missing_sha256_prefix"
+        | "invalid_hex"
+        | "invalid_hex_length"
+        | "mismatch"
+    }
+
+export function verifyGithubSignature(args: {
   secret: string
   payload: string
-  signature256?: string | null
-}): boolean {
-  const { secret, payload } = opts
-  let { signature256 } = opts
+  signature256: string | null
+}): VerifyGithubSignatureResult {
+  const { secret, payload, signature256 } = args
 
-  if (!signature256) return false
+  // header 必須
+  if (!signature256) return { ok: false, reason: "missing_header" }
 
-  signature256 = signature256.trim()
-  const [algo, sigPart] = signature256.split("=")
-  const signature = sigPart?.trim()
+  const header = signature256.trim()
 
-  if (algo !== "sha256" || !signature) return false
+  // "sha256=" 必須
+  if (!header.toLowerCase().startsWith("sha256=")) {
+    return { ok: false, reason: "missing_sha256_prefix" }
+  }
 
-  const hmac = crypto.createHmac("sha256", secret)
-  const digest = hmac.update(payload, "utf8").digest("hex")
+  const hex = header.slice("sha256=".length).trim()
 
-  const sigBuf = Buffer.from(signature, "hex")
-  const digestBuf = Buffer.from(digest, "hex")
+  // 16進文字のみ
+  if (!/^[0-9a-fA-F]+$/.test(hex)) return { ok: false, reason: "invalid_hex" }
 
-  if (sigBuf.length !== digestBuf.length) return false
+  // sha256 は 32bytes = 64hex
+  if (hex.length !== 64) return { ok: false, reason: "invalid_hex_length" }
 
-  return crypto.timingSafeEqual(sigBuf, digestBuf)
+  const expectedHex = createHmac("sha256", secret).update(payload, "utf8").digest("hex")
+
+  const a = Buffer.from(expectedHex, "hex")
+  const b = Buffer.from(hex.toLowerCase(), "hex")
+
+  if (a.length !== b.length) return { ok: false, reason: "mismatch" }
+
+  const ok = timingSafeEqual(a, b)
+  return ok ? { ok: true } : { ok: false, reason: "mismatch" }
 }
