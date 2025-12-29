@@ -172,11 +172,6 @@ export async function POST(req: NextRequest) {
   const eventName = req.headers.get("x-github-event") ?? "unknown"
   const signature256 = req.headers.get("x-hub-signature-256")
 
-  // 開発用：今だけ返す（確認できたら消す）
-  if (process.env.DEBUG_WEBHOOK_HEADERS === "1") {
-    return NextResponse.json({ ok: true, debug: { eventName, deliveryId } })
-  }
-
   // raw body（署名検証のために必ず text）
   const rawBody = await req.text()
   const rawPayload = parseRawPayload(rawBody)
