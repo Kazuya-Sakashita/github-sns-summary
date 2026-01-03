@@ -13,9 +13,10 @@
     "prisma:seed": "ts-node --esm prisma/seed.ts",
     "typecheck": "tsc --noEmit",
     "prisma:backfill:delivery": "ts-node --esm prisma/backfill_github_delivery_id.ts",
-    "test": "dotenv -e .env -- vitest",
-    "test:run": "vitest run",
-    "test:watch": "vitest"
+    "test": "dotenv -e .env -- vitest run",
+    "test:watch": "dotenv -e .env -- vitest --config vitest.unit.config.ts",
+    "test:db": "dotenv -e .env -- vitest run --config vitest.db.config.ts",
+    "test:db:watch": "dotenv -e .env -- vitest --config vitest.db.config.ts"
   },
   "dependencies": {
     "@prisma/adapter-better-sqlite3": "^7.1.0",

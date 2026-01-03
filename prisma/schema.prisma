@@ -1,10 +1,7 @@
-// prisma/schema.prisma
-
 // ==================== Datasource ====================
 datasource db {
   provider = "sqlite"
-  // Prisma 7 では接続URLはここには書かず、
-  // prisma.config.ts 側の datasource.url で指定します
+  // Prisma 7 では接続URLは prisma.config.ts 側で指定
 }
 
 // ==================== Generator ====================
@@ -14,12 +11,12 @@ generator client {
 
 // ==================== Enums ====================
 
-// ✅ Webhook 受信ログの処理ステータス
+// Webhook 受信ログの処理ステータス
 enum WebhookDeliveryStatus {
-  RECEIVED // 受信してログは作った（処理前）
-  PROCESSED // 本処理まで成功
-  FAILED // 本処理が失敗
-  IGNORED // 対象外イベントなどで処理しなかった
+  RECEIVED   // 受信してログは作った（処理前）
+  PROCESSED  // 本処理まで成功
+  FAILED     // 本処理が失敗
+  IGNORED    // 対象外イベントなどで処理しなかった
 }
 
 // ==================== Models ====================
@@ -33,83 +30,109 @@ model User {
   events GithubEvent[]
 }
 
-// GitHub から受け取った PR マージイベント
+// ==================== GitHub Event ====================
+// PR を軸に、要約・分析に使う情報を集約する中核テーブル
 model GithubEvent {
   id String @id @default(cuid())
 
-  // ✅ GitHub Webhook の delivery ID（x-github-delivery）
-  // 同じ Webhook が再送されても同一IDになるため、これで二重保存を防止できる
+  // Webhook 冪等性キー
   githubDeliveryId String @unique
 
-  // マルチテナント対応用（フェーズ1では OWNER_USER_ID を入れる）
+  // マルチテナント（フェーズ1では OWNER_USER_ID を想定）
   userId String
   user   User   @relation(fields: [userId], references: [id])
 
-  // GitHub PR 情報
-  repoName       String // 例: "kz2021019/docsnap"
-  prNumber       Int // PR 番号 (#12 など)
+  // PR 基本情報（Webhook payload 由来）
+  repoName       String   // "owner/repo"
+  prNumber       Int
   prTitle        String
-  prUrl          String // GitHub 上の PR URL
-  mergedBy       String? // マージしたユーザー名 (login)。不明なら null
+  prUrl          String
+  mergedBy       String?
   mergedAt       DateTime?
   mergeCommitSha String?
 
-  // Webhook の payload 丸ごと
+  // Webhook payload を保持（調査・再処理用）
   rawPayload Json
+
+  // =========================
+  // #35: PR 詳細（GitHub API 補完）
+  // =========================
+  prAuthor     String?    // PR 作成者 login
+  prBody       String?    // PR 本文（description）
+  prLabels     Json?      // ["bug","feature"] など（name のみ）
+  prFetchedAt  DateTime?
+  prFetchError String?
+
+  // =========================
+  // #36: 変更ファイル集計（SNS要約向け）
+  // =========================
+  prFilesCount Int?
+  prAdditions  Int?
+  prDeletions  Int?
+
+  // 拡張子 / レイヤー / 種別など自由に使える集計
+  // 例: { ".ts": 3, "prisma": 2, "noext": 1 }
+  prFileStats Json?
+  prChanges    Int?
 
   createdAt DateTime @default(now())
 
-  posts SnsPost[]
-
-  // ✅ 逆側（GithubWebhookDelivery とのリレーション）
+  // relations
+  posts             SnsPost[]
   webhookDeliveries GithubWebhookDelivery[]
+  prFiles           GithubPullRequestFile[]
 
-  // 同一PRの収束用（owner + repo + prNumber）
+  // 同一PRの収束
   @@unique([userId, repoName, prNumber])
   @@index([userId, createdAt])
   @@index([repoName, prNumber])
+  @@index([prFetchedAt])
 }
 
-// ✅ Webhook 受信ログ（冪等性の本体）
+// ==================== PR Changed Files ====================
+// pulls/{number}/files の内容を保持
+model GithubPullRequestFile {
+  id String @id @default(cuid())
+
+  eventId String
+  event   GithubEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  filename  String
+  status    String   // "added" | "modified" | "removed" | "renamed" など
+  additions Int
+  deletions Int
+  changes   Int
+
+  // ".ts" / ".prisma" / null（拡張子なし）
+  extension String?
+
+  createdAt DateTime @default(now())
+
+  // 同一 PR 内の同一ファイルは upsert 対象
+  @@unique([eventId, filename])
+  @@index([eventId])
+  @@index([extension])
+}
+
+// ==================== Webhook Delivery Log ====================
 model GithubWebhookDelivery {
   id String @id @default(cuid())
 
-  // x-github-delivery（冪等性キー）
-  deliveryId String @unique
-
-  // x-github-event（例: pull_request）
-  eventName String
-
-  // x-hub-signature-256（prodのみ検証するが、保存しておくと調査が楽）
+  deliveryId String @unique      // x-github-delivery
+  eventName  String              // x-github-event
   signature256 String?
 
-  // ✅ 受信時刻（最初に受け取った時刻）
   receivedAt DateTime @default(now())
 
-  // =========================
-  // ✅ #25 追加: 処理結果・再実行用
-  // =========================
-
-  // 現在の状態
-  status WebhookDeliveryStatus @default(RECEIVED)
-
-  // 何回処理を試みたか（FAILEDの再送/再処理に備える）
-  attemptCount Int @default(0)
-
-  // 最後に処理を試みた時刻
+  status        WebhookDeliveryStatus @default(RECEIVED)
+  attemptCount  Int @default(0)
   lastAttemptAt DateTime?
+  processedAt   DateTime?
+  errorMessage  String?
 
-  // 処理が完了した時刻（PROCESSED / IGNORED のときに入れる想定）
-  processedAt DateTime?
-
-  // 失敗理由（FAILED のときに入れる）
-  errorMessage String?
-
-  // この delivery が最終的に紐づいた GithubEvent（任意）
   githubEventId String?
   githubEvent   GithubEvent? @relation(fields: [githubEventId], references: [id])
 
-  // 調査用に payload を保持
   rawPayload Json
 
   @@index([eventName, receivedAt])
@@ -117,16 +140,16 @@ model GithubWebhookDelivery {
   @@index([status, receivedAt])
 }
 
-// GitHub イベントをもとに行った SNS / Webhook 投稿ログ
+// ==================== SNS Post Log ====================
 model SnsPost {
   id String @id @default(cuid())
 
   eventId String
   event   GithubEvent @relation(fields: [eventId], references: [id])
 
-  platform     String // "webhook" | "x" | "bluesky" など
-  content      String // 実際に投稿した（しようとした）本文
-  status       String // "SUCCESS" | "FAILED" | "SKIPPED"
+  platform     String   // "webhook" | "x" | "bluesky" など
+  content      String
+  status       String   // "SUCCESS" | "FAILED" | "SKIPPED"
   externalId   String?
   errorMessage String?
 

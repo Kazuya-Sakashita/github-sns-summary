@@ -6,6 +6,11 @@ import { fetchPullRequestDetails } from "@/lib/github/fetchPullRequest"
 import { revalidatePath } from "next/cache"
 import { Prisma } from "@prisma/client"
 import type { WebhookDeliveryStatus } from "@prisma/client"
+import {
+  fetchPullRequestFiles,
+  summarizePullRequestFiles,
+  type PullRequestFileItem, // ★ PullRequestFile → PullRequestFileItem
+} from "@/lib/github/fetchPullRequestFiles"
 
 type PullRequestPayload = {
   action: string
@@ -17,9 +22,6 @@ type PullRequestPayload = {
     merged_by: { login: string } | null
     merged_at: string | null
     merge_commit_sha: string | null
-
-    // PR webhook payload は PR オブジェクトを含むが、
-    // null/undefined の可能性もあるので optional で扱う
     body?: string | null
     user?: { login: string } | null
   }
@@ -38,7 +40,6 @@ function isKnownRequestError(e: unknown): e is Prisma.PrismaClientKnownRequestEr
 }
 
 function shouldShortCircuit(status: WebhookDeliveryStatus) {
-  // 既に処理済み/無視済みなら同じ delivery を何度受けても即返す
   return status === "PROCESSED" || status === "IGNORED"
 }
 
@@ -56,7 +57,6 @@ function parseRawPayload(rawBody: string): Prisma.InputJsonValue {
   try {
     return JSON.parse(rawBody) as Prisma.InputJsonValue
   } catch {
-    // 署名検証失敗時などの調査用に raw text も残せるようにしておく
     return rawBody as unknown as Prisma.InputJsonValue
   }
 }
@@ -65,10 +65,6 @@ function isObjectPayload(rawPayload: Prisma.InputJsonValue): rawPayload is Prism
   return typeof rawPayload === "object" && rawPayload !== null && !Array.isArray(rawPayload)
 }
 
-/**
- * pull_request の最低限の shape チェック
- * - merged は false のことも多いので boolean であることだけ確認
- */
 function isPullRequestPayload(x: Prisma.JsonObject): x is PullRequestPayload {
   const o = x as Record<string, unknown>
   const pr = o["pull_request"] as Record<string, unknown> | undefined
@@ -86,9 +82,6 @@ function isPullRequestPayload(x: Prisma.JsonObject): x is PullRequestPayload {
   )
 }
 
-/**
- * delivery log を作成 or 既存取得（レース対策込み）
- */
 async function findOrCreateDeliveryLog(params: {
   deliveryId: string
   eventName: string
@@ -116,7 +109,6 @@ async function findOrCreateDeliveryLog(params: {
       select: { id: true, status: true, attemptCount: true, githubEventId: true },
     })
   } catch (e) {
-    // 同時到達で create が競合した場合は取り直す
     if (isKnownRequestError(e) && e.code === "P2002") {
       const again = await prisma.githubWebhookDelivery.findUnique({
         where: { deliveryId },
@@ -128,9 +120,6 @@ async function findOrCreateDeliveryLog(params: {
   }
 }
 
-/**
- * PRの変化タイミングで GitHub API から本文/ラベルを取り直したい action
- */
 function shouldFetchDetails(action: string): boolean {
   return [
     "opened",
@@ -144,10 +133,17 @@ function shouldFetchDetails(action: string): boolean {
   ].includes(action)
 }
 
+/**
+ * ★重要：PullRequestFile に固定して型が崩れないようにする
+ */
+function uniqByFilename(files: PullRequestFileItem[]): PullRequestFileItem[] {
+  return Array.from(new Map(files.map((f) => [f.filename, f])).values())
+}
+
 export async function POST(req: NextRequest) {
   const secret = process.env.GITHUB_WEBHOOK_SECRET
   const ownerUserId = process.env.OWNER_USER_ID
-  const githubToken = process.env.GITHUB_TOKEN // PR本文/ラベル補完用（無ければスキップ）
+  const githubToken = process.env.GITHUB_TOKEN
 
   if (!secret || !ownerUserId) {
     return NextResponse.json(
@@ -156,14 +152,13 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  // owner user exists?（P2003回避）
+  // OWNER_USER_ID の user が無いと FK で落ちるので先に検証
   const ownerUser = await prisma.user.findUnique({ where: { id: ownerUserId } })
   if (!ownerUser) {
     console.error("[github-webhook] OWNER_USER_ID user not found", { ownerUserId })
     return NextResponse.json({ error: "Owner user not found" }, { status: 500 })
   }
 
-  // headers
   const deliveryId = req.headers.get("x-github-delivery")
   if (!deliveryId) {
     return NextResponse.json({ error: "Missing x-github-delivery header" }, { status: 400 })
@@ -172,27 +167,17 @@ export async function POST(req: NextRequest) {
   const eventName = req.headers.get("x-github-event") ?? "unknown"
   const signature256 = req.headers.get("x-hub-signature-256")
 
-  // raw body（署名検証のために必ず text）
   const rawBody = await req.text()
   const rawPayload = parseRawPayload(rawBody)
 
-  // =====================================================
-  // 1) delivery log を確実に作る / 既存を取得する
-  // =====================================================
   let delivery: DeliveryLog
   try {
-    delivery = await findOrCreateDeliveryLog({
-      deliveryId,
-      eventName,
-      signature256,
-      rawPayload,
-    })
+    delivery = await findOrCreateDeliveryLog({ deliveryId, eventName, signature256, rawPayload })
   } catch (e) {
     console.error("[github-webhook] failed to create delivery log", e)
     return NextResponse.json({ error: "Failed to log delivery" }, { status: 500 })
   }
 
-  // 完了済みは即終了（PROCESSED / IGNORED）
   if (shouldShortCircuit(delivery.status)) {
     return NextResponse.json({
       ok: true,
@@ -204,9 +189,6 @@ export async function POST(req: NextRequest) {
     })
   }
 
-  // =====================================================
-  // 2) 今回の試行を記録（attemptCount++, lastAttemptAt, status=RECEIVED）
-  // =====================================================
   await prisma.githubWebhookDelivery.update({
     where: { deliveryId },
     data: {
@@ -220,11 +202,6 @@ export async function POST(req: NextRequest) {
     },
   })
 
-  // =====================================================
-  // 2.5) 署名検証（厳密化）
-  // - 原則: 常に検証（missing/format/mismatch も 401）
-  // - 例外: SKIP_GITHUB_SIGNATURE_VERIFY=1 のときだけスキップ
-  // =====================================================
   const skipVerify = process.env.SKIP_GITHUB_SIGNATURE_VERIFY === "1"
   if (!skipVerify) {
     const verified = verifyGithubSignature({ secret, payload: rawBody, signature256 })
@@ -244,9 +221,6 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // =====================================================
-  // 3) 対象外イベント → IGNORED（push が来るのは “Send me everything” なので正常）
-  // =====================================================
   if (eventName !== "pull_request") {
     await prisma.githubWebhookDelivery.update({
       where: { deliveryId },
@@ -255,9 +229,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, ignored: true, reason: "not pull_request" })
   }
 
-  // =====================================================
-  // 3.5) pull_request なのに JSON が壊れてる → FAILED
-  // =====================================================
   if (!isObjectPayload(rawPayload)) {
     await prisma.githubWebhookDelivery.update({
       where: { deliveryId },
@@ -266,9 +237,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 })
   }
 
-  // =====================================================
-  // 3.6) JSON は object だが、想定 shape ではない → FAILED
-  // =====================================================
   if (!isPullRequestPayload(rawPayload)) {
     await prisma.githubWebhookDelivery.update({
       where: { deliveryId },
@@ -283,23 +251,15 @@ export async function POST(req: NextRequest) {
   const repoFullName = repository.full_name
   const prNumber = pull_request.number
 
-  // merge 情報（mergeしてないPRでは null/false になってOK）
   const mergedBy = pull_request.merged_by?.login ?? null
   const mergedAt = pull_request.merged_at ? new Date(pull_request.merged_at) : null
   const mergeCommitSha = pull_request.merge_commit_sha ?? null
 
-  // =====================================================
-  // 4) PR作成/更新のたびに GithubEvent を upsert（merge 以外でも保存）
-  // =====================================================
   try {
     const saved = await prisma.$transaction(async (tx) => {
       const event = await tx.githubEvent.upsert({
         where: {
-          userId_repoName_prNumber: {
-            userId: ownerUserId,
-            repoName: repoFullName,
-            prNumber,
-          },
+          userId_repoName_prNumber: { userId: ownerUserId, repoName: repoFullName, prNumber },
         },
         create: {
           githubDeliveryId: deliveryId,
@@ -312,8 +272,6 @@ export async function POST(req: NextRequest) {
           mergedAt,
           mergeCommitSha,
           rawPayload: payload as unknown as Prisma.InputJsonValue,
-
-          // 既存カラム（schemaで確認済み）
           prAuthor: pull_request.user?.login ?? null,
           prBody: pull_request.body ?? null,
           prLabels: [] as unknown as Prisma.InputJsonValue,
@@ -327,8 +285,6 @@ export async function POST(req: NextRequest) {
           mergedAt,
           mergeCommitSha,
           rawPayload: payload as unknown as Prisma.InputJsonValue,
-
-          // webhook に body/user が含まれるケースがあるので反映（edited など）
           prAuthor: pull_request.user?.login ?? null,
           prBody: pull_request.body ?? null,
         },
@@ -348,10 +304,7 @@ export async function POST(req: NextRequest) {
       return event
     })
 
-    // =====================================================
-    // 5) GitHub API で PR本文/ラベルを補完（任意）
-    // - GITHUB_TOKEN がない場合はスキップ
-    // =====================================================
+    // #35: 本文/ラベル補完（任意）
     if (githubToken && shouldFetchDetails(action)) {
       try {
         const details = await fetchPullRequestDetails({
@@ -359,7 +312,6 @@ export async function POST(req: NextRequest) {
           repoFullName,
           prNumber,
         })
-
         await prisma.githubEvent.update({
           where: { id: saved.id },
           data: {
@@ -374,10 +326,51 @@ export async function POST(req: NextRequest) {
         const msg = toErrorMessage(e)
         await prisma.githubEvent.update({
           where: { id: saved.id },
-          data: {
-            prFetchedAt: new Date(),
-            prFetchError: msg,
-          },
+          data: { prFetchedAt: new Date(), prFetchError: msg },
+        })
+      }
+    }
+
+    // #36: 変更ファイル保存（任意）
+    if (githubToken && shouldFetchDetails(action)) {
+      try {
+        const files = await fetchPullRequestFiles({ token: githubToken, repoFullName, prNumber })
+        const summary = summarizePullRequestFiles(files)
+        const uniqueFiles = uniqByFilename(files)
+
+        await prisma.$transaction(async (tx) => {
+          // いったん同期（全削除→最新insert）
+          await tx.githubPullRequestFile.deleteMany({ where: { eventId: saved.id } })
+
+          if (uniqueFiles.length > 0) {
+            await tx.githubPullRequestFile.createMany({
+              data: uniqueFiles.map((f) => ({
+                eventId: saved.id,
+                filename: f.filename,
+                status: f.status,
+                additions: f.additions,
+                deletions: f.deletions,
+                changes: f.changes,
+                extension: f.extension,
+              })),
+            })
+          }
+
+          await tx.githubEvent.update({
+            where: { id: saved.id },
+            data: {
+              prFilesCount: summary.prFilesCount,
+              prAdditions: summary.prAdditions,
+              prDeletions: summary.prDeletions,
+              prFileStats: summary.prFileStats as unknown as Prisma.InputJsonValue,
+            },
+          })
+        })
+      } catch (e) {
+        const msg = toErrorMessage(e)
+        await prisma.githubEvent.update({
+          where: { id: saved.id },
+          data: { prFetchError: msg, prFetchedAt: new Date() },
         })
       }
     }

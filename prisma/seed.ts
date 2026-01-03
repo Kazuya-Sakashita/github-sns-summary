@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 // prisma/seed.ts
 import "dotenv/config"
 import { PrismaClient, Prisma } from "@prisma/client"
@@ -10,83 +11,44 @@ const adapter = new PrismaBetterSqlite3({
 
 const prisma = new PrismaClient({ adapter })
 
-/**
- * createdAt を安全にずらす（SQLiteでも安定して "最新" 判定させる）
- */
 function minutesAgo(min: number) {
   return new Date(Date.now() - min * 60 * 1000)
 }
 
-/**
- * seed 用 deliveryId（@unique 必須）
- * - GitHub 本番だと x-github-delivery が入る想定
- * - seed は衝突しないよう UUID を使う
- */
 function seedDeliveryId(label: string) {
-  // x-github-delivery は UUID 形式っぽいことが多いので寄せてもOK
   return `seed-${label}-${randomUUID()}`
 }
 
-/**
- * cuid運用で「Owner を必ず 1人」に寄せる。
- * - OWNER_USER_ID があれば、その User を必ず使う（無ければ作らない・エラー）
- * - OWNER_USER_ID が無ければ、既存 user がいればそれを使う / 無ければ作る
- */
 async function resolveOwnerUser() {
   const ownerUserId = process.env.OWNER_USER_ID
 
   if (ownerUserId) {
     const owner = await prisma.user.findUnique({ where: { id: ownerUserId } })
     if (!owner) {
-      throw new Error(`OWNER_USER_ID is set but user not found. OWNER_USER_ID="${ownerUserId}"`)
+      throw new Error(`OWNER_USER_ID is set but user not found: ${ownerUserId}`)
     }
     return owner
   }
 
-  // OWNER_USER_ID 未指定なら既存の先頭を使う（なければ作る）
   const existing = await prisma.user.findFirst({ orderBy: { createdAt: "asc" } })
   if (existing) return existing
 
-  return prisma.user.create({
-    data: { name: "Owner" },
-  })
+  return prisma.user.create({ data: { name: "Owner" } })
 }
 
 async function main() {
   const owner = await resolveOwnerUser()
 
-  console.log("Owner user:")
-  console.log("id  :", owner.id)
-  console.log("name:", owner.name)
+  console.log("Owner:", owner.id)
 
-  console.log("\nSet OWNER_USER_ID in .env as:")
-  console.log(`OWNER_USER_ID="${owner.id}"`)
-
-  // 既存のイベント＆投稿ログを一旦クリアしてクリーンな状態にする（Owner分だけ）
-  console.log("\nClearing existing events/posts for this owner ...")
   await prisma.snsPost.deleteMany({ where: { event: { userId: owner.id } } })
   await prisma.githubEvent.deleteMany({ where: { userId: owner.id } })
 
-  console.log("Seeding GithubEvent + SnsPost ...\n")
-
   /**
-   * 目的：
-   * - /dashboard のカードで Webhook 状態を確認できるようにする
-   *   - 未送信（webhook の post が無い）
-   *   - 送信済み（webhook の post が SUCCESS）
-   *   - 送信失敗（webhook の post が FAILED）
-   *
-   * 注意：
-   * - /dashboard は posts の「最新1件（take:1）」を見る設計なので
-   *   webhook 状態を見せたいカードでは webhook の post を "最新" にする必要がある
+   * =====================================
+   * A) 未送信（ai-preview のみ）
+   * =====================================
    */
-
-  // ※ mergedAt / mergeCommitSha は Issue #22 に合わせて seed にも入れておく
-  //    （本番では GitHub webhook payload から入る）
-
-  // -----------------------------
-  // A) 未送信：ai-preview だけ（webhook post なし）
-  // -----------------------------
   await prisma.githubEvent.create({
     data: {
       githubDeliveryId: seedDeliveryId("unsent"),
@@ -97,23 +59,54 @@ async function main() {
       prUrl: "https://github.com/owner/repository-name/pull/123",
       mergedBy: "tanaka-taro",
       mergedAt: minutesAgo(70),
-      mergeCommitSha: `seed-unsent-${randomUUID().replace(/-/g, "")}`,
-      rawPayload: {
-        sample: true,
-        type: "pull_request",
-        action: "closed",
-        merged: true,
-        merged_by: { login: "tanaka-taro" },
-        merged_at: minutesAgo(70).toISOString(),
-        merge_commit_sha: "seed-unsent",
+      mergeCommitSha: "seed-unsent",
+
+      rawPayload: { seed: true } satisfies Prisma.InputJsonValue,
+
+      // #35
+      prAuthor: "tanaka-taro",
+      prBody: "JWT 認証を導入し、UI を改善しました。",
+      prLabels: ["feature", "auth"] satisfies Prisma.InputJsonValue,
+      prFetchedAt: minutesAgo(65),
+      prFetchError: null,
+
+      // #36 集計
+      prFilesCount: 2,
+      prAdditions: 120,
+      prDeletions: 10,
+      prChanges: 130,
+      prFileStats: {
+        ".ts": 2,
       } satisfies Prisma.InputJsonValue,
+
+      prFiles: {
+        create: [
+          {
+            filename: "backend/auth/jwt.ts",
+            status: "added",
+            additions: 80,
+            deletions: 0,
+            changes: 80,
+            extension: ".ts",
+          },
+          {
+            filename: "frontend/components/LoginForm.tsx",
+            status: "modified",
+            additions: 40,
+            deletions: 10,
+            changes: 50,
+            extension: ".tsx",
+          },
+        ],
+      },
+
       createdAt: minutesAgo(60),
+
       posts: {
         create: [
           {
             platform: "ai-preview",
-            content:
-              "このPRでは、ユーザー認証システムを新たに実装しました。主な変更点として、JWTベースの認証機能、ログイン・ログアウトのエンドポイント、認証ミドルウェアを追加しています。また、ログインフォームのUIを改善し、エラーハンドリングを強化しました。",
+            content: "JWT 認証を追加し、UI を改善しました。",
             status: "SUCCESS",
             createdAt: minutesAgo(59),
           },
@@ -122,47 +115,84 @@ async function main() {
     },
   })
 
-  // -----------------------------
-  // B) 送信済み：webhook post を最新にする（SUCCESS）
-  // -----------------------------
+  /**
+   * =====================================
+   * B) Webhook 成功
+   * =====================================
+   */
   await prisma.githubEvent.create({
     data: {
       githubDeliveryId: seedDeliveryId("success"),
       userId: owner.id,
       repoName: "owner/api-server",
       prNumber: 87,
-      prTitle: "バグ修正: データベース接続エラーのハンドリング",
+      prTitle: "バグ修正: DB 接続エラーのハンドリング改善",
       prUrl: "https://github.com/owner/api-server/pull/87",
       mergedBy: "suzuki-hanako",
       mergedAt: minutesAgo(50),
-      mergeCommitSha: `seed-success-${randomUUID().replace(/-/g, "")}`,
-      rawPayload: {
-        sample: true,
-        type: "pull_request",
-        action: "closed",
-        merged: true,
-        merged_by: { login: "suzuki-hanako" },
-        merged_at: minutesAgo(50).toISOString(),
-        merge_commit_sha: "seed-success",
+      mergeCommitSha: "seed-success",
+
+      rawPayload: { seed: true } satisfies Prisma.InputJsonValue,
+
+      prAuthor: "suzuki-hanako",
+      prBody: "DB 接続失敗時のリトライ処理を追加。",
+      prLabels: ["bugfix", "backend"] satisfies Prisma.InputJsonValue,
+      prFetchedAt: minutesAgo(45),
+      prFetchError: null,
+
+      prFilesCount: 3,
+      prAdditions: 60,
+      prDeletions: 20,
+      prChanges: 80,
+      prFileStats: {
+        ".ts": 2,
+        ".sql": 1,
       } satisfies Prisma.InputJsonValue,
+
+      prFiles: {
+        create: [
+          {
+            filename: "server/db/connection.ts",
+            status: "modified",
+            additions: 30,
+            deletions: 10,
+            changes: 40,
+            extension: ".ts",
+          },
+          {
+            filename: "server/db/retry.ts",
+            status: "added",
+            additions: 30,
+            deletions: 0,
+            changes: 30,
+            extension: ".ts",
+          },
+          {
+            filename: "migrations/fix.sql",
+            status: "modified",
+            additions: 0,
+            deletions: 10,
+            changes: 10,
+            extension: ".sql",
+          },
+        ],
+      },
+
       createdAt: minutesAgo(40),
+
       posts: {
         create: [
-          // 先に ai-preview（古い）
           {
             platform: "ai-preview",
-            content:
-              "データベース接続が失敗した際のエラーハンドリングを改善しました。リトライロジックを追加し、接続プールの設定を最適化しています。これにより、一時的なネットワークエラーに対する耐性が向上しました。",
+            content: "DB 接続エラー時のリトライ処理を改善しました。",
             status: "SUCCESS",
             createdAt: minutesAgo(39),
           },
-          // 次に webhook（新しい＝最新1件）
           {
             platform: "webhook",
-            content: "Webhook送信済みテスト：DB接続エラーのハンドリング改善を反映しました。",
+            content: "Webhook 送信成功",
             status: "SUCCESS",
             externalId: "seed-success-001",
-            errorMessage: null,
             createdAt: minutesAgo(38),
           },
         ],
@@ -170,47 +200,67 @@ async function main() {
     },
   })
 
-  // -----------------------------
-  // C) 送信失敗：webhook post を最新にする（FAILED）
-  // -----------------------------
+  /**
+   * =====================================
+   * C) Webhook 失敗
+   * =====================================
+   */
   await prisma.githubEvent.create({
     data: {
       githubDeliveryId: seedDeliveryId("failed"),
       userId: owner.id,
       repoName: "owner/frontend-app",
       prNumber: 234,
-      prTitle: "パフォーマンス改善: 画像の遅延読み込みを実装",
+      prTitle: "パフォーマンス改善: 画像の遅延読み込み",
       prUrl: "https://github.com/owner/frontend-app/pull/234",
       mergedBy: "yamada-ichiro",
       mergedAt: minutesAgo(30),
-      mergeCommitSha: `seed-failed-${randomUUID().replace(/-/g, "")}`,
-      rawPayload: {
-        sample: true,
-        type: "pull_request",
-        action: "closed",
-        merged: true,
-        merged_by: { login: "yamada-ichiro" },
-        merged_at: minutesAgo(30).toISOString(),
-        merge_commit_sha: "seed-failed",
+      mergeCommitSha: "seed-failed",
+
+      rawPayload: { seed: true } satisfies Prisma.InputJsonValue,
+
+      prAuthor: "yamada-ichiro",
+      prBody: "Intersection Observer を用いた画像遅延読み込み。",
+      prLabels: ["performance", "frontend"] satisfies Prisma.InputJsonValue,
+      prFetchedAt: minutesAgo(25),
+      prFetchError: null,
+
+      prFilesCount: 1,
+      prAdditions: 25,
+      prDeletions: 5,
+      prChanges: 30,
+      prFileStats: {
+        ".tsx": 1,
       } satisfies Prisma.InputJsonValue,
+
+      prFiles: {
+        create: [
+          {
+            filename: "components/LazyImage.tsx",
+            status: "added",
+            additions: 25,
+            deletions: 5,
+            changes: 30,
+            extension: ".tsx",
+          },
+        ],
+      },
+
       createdAt: minutesAgo(20),
+
       posts: {
         create: [
-          // ai-preview（古い）
           {
             platform: "ai-preview",
-            content:
-              "画像の遅延読み込み機能を実装し、初期ページ読み込み時のパフォーマンスを大幅に改善しました。Intersection Observer APIを使用し、ビューポートに入った画像のみを読み込むように変更しています。",
+            content: "画像遅延読み込みで表示速度を改善しました。",
             status: "SUCCESS",
             createdAt: minutesAgo(19),
           },
-          // webhook（新しい＝最新1件、FAILED）
           {
             platform: "webhook",
-            content: "Webhook送信失敗テスト：画像遅延読み込み実装の投稿を試行しました。",
+            content: "Webhook 送信失敗",
             status: "FAILED",
-            externalId: null,
-            errorMessage: "fetch failed（seed用の疑似エラー）",
+            errorMessage: "fetch failed (seed)",
             createdAt: minutesAgo(18),
           },
         ],
@@ -218,7 +268,7 @@ async function main() {
     },
   })
 
-  console.log("Seeding completed 🎉")
+  console.log("Seed completed 🎉")
 }
 
 main()
